@@ -30,6 +30,13 @@ func InvalidateCache() {
 	mu.Lock()
 	defer mu.Unlock()
 	noProxyUntil = time.Time{}
+
+	// Also drop the cached proxy.conf so that subsequent reads (e.g. proxy auth
+	// lookups) re-read it from disk. A full proxy reload uses ReloadProxyConfig.
+	configFileMu.Lock()
+	configFileRead = false
+	cachedFileConf = nil
+	configFileMu.Unlock()
 }
 
 var (
@@ -61,7 +68,13 @@ func getProxyFunc() func(*url.URL) (*url.URL, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	if config == nil {
-		config = httpproxy.FromEnvironment()
+		// Priority: proxy.conf (if present) overrides the environment.
+		if fileConf := configFromFile(); fileConf != nil {
+			config = fileConf
+			log.Printf("tshttpproxy: using proxy config from %s", proxyConfigFileName)
+		} else {
+			config = httpproxy.FromEnvironment()
+		}
 	}
 	if proxyFunc == nil {
 		proxyFunc = config.ProxyFunc()
@@ -201,6 +214,12 @@ func GetAuthHeader(u *url.URL) (string, error) {
 
 		req := &http.Request{Header: make(http.Header)}
 		req.SetBasicAuth(user, pass)
+		return req.Header.Get("Authorization"), nil
+	}
+	// Fall back to credentials from proxy.conf, if configured.
+	if fc := loadProxyConfig(); fc != nil && fc.ProxyAuth != nil && fc.ProxyAuth.Username != "" {
+		req := &http.Request{Header: make(http.Header)}
+		req.SetBasicAuth(fc.ProxyAuth.Username, fc.ProxyAuth.Password)
 		return req.Header.Get("Authorization"), nil
 	}
 	if sysAuthHeader != nil {
