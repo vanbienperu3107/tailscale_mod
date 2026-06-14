@@ -1,0 +1,80 @@
+name: Build Windows Portable
+
+# Builds a portable Windows (amd64) zip of Tailscale on every push to main.
+# The zip bundles tailscale.exe, tailscaled.exe, start/stop scripts, a README
+# and a default proxy.conf. Download it from the run's "Artifacts" section.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags so version stamping works
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compute version
+        id: ver
+        run: |
+          eval "$(go run ./cmd/mkversion)"
+          echo "short=${VERSION_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "long=${VERSION_LONG}" >> "$GITHUB_OUTPUT"
+          echo "Building version ${VERSION_LONG}"
+
+      - name: Build Windows binaries (amd64)
+        run: |
+          set -eu
+          mkdir -p dist/tailscale-portable
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            sh ./build_dist.sh -o dist/tailscale-portable/tailscale.exe  tailscale.com/cmd/tailscale
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            sh ./build_dist.sh -o dist/tailscale-portable/tailscaled.exe tailscale.com/cmd/tailscaled
+
+      - name: Add portable assets (proxy.conf, scripts, README)
+        run: |
+          set -eu
+          cp release/windows-portable/proxy.conf        dist/tailscale-portable/
+          cp release/windows-portable/start-tailscale.bat dist/tailscale-portable/
+          cp release/windows-portable/stop-tailscale.bat  dist/tailscale-portable/
+          cp release/windows-portable/README.txt         dist/tailscale-portable/
+          ls -la dist/tailscale-portable
+
+      - name: Package zip + checksum
+        id: pkg
+        run: |
+          set -eu
+          name="tailscale-portable-windows-amd64-${{ steps.ver.outputs.short }}"
+          ( cd dist && mv tailscale-portable "${name}" && zip -r "${name}.zip" "${name}" )
+          ( cd dist && sha256sum "${name}.zip" > "${name}.zip.sha256" )
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            dist/${{ steps.pkg.outputs.name }}.zip
+            dist/${{ steps.pkg.outputs.name }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
