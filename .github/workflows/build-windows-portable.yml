@@ -103,8 +103,8 @@ jobs:
           set -eu
           TAG="windows-latest"
           TITLE="Tailscale (mod) Windows - ${{ steps.ver.outputs.short }}"
-          # Single-quoted heredoc: GitHub substitutes ${{ }} before bash runs,
-          # and bash leaves backticks/dollar signs untouched.
+          # Single-quoted heredoc keeps backticks/dollar signs literal for bash;
+          # Actions still expands its own expression tokens first.
           cat > dist/notes.md <<'EOF'
           Automated Windows (amd64) build of Tailscale (mod).
 
