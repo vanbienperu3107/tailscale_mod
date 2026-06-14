@@ -1,8 +1,9 @@
-name: Build Windows Portable
+name: Build Windows (portable + installer)
 
-# Builds a portable Windows (amd64) zip of Tailscale on every push to main.
-# The zip bundles tailscale.exe, tailscaled.exe, start/stop scripts, a README
-# and a default proxy.conf. Download it from the run's "Artifacts" section.
+# On every push to main (and via manual dispatch), cross-compile Windows
+# (amd64) and publish two zips - a portable build and a service installer -
+# both bundling a default proxy.conf. The zips are uploaded as run artifacts
+# and attached to a rolling pre-release tagged "windows-latest".
 
 on:
   push:
@@ -13,10 +14,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # needed to publish the rolling release
 
 concurrency:
-  group: build-windows-portable-${{ github.ref }}
+  group: build-windows-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -45,36 +46,78 @@ jobs:
       - name: Build Windows binaries (amd64)
         run: |
           set -eu
-          mkdir -p dist/tailscale-portable
+          mkdir -p build/bin
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-            sh ./build_dist.sh -o dist/tailscale-portable/tailscale.exe  tailscale.com/cmd/tailscale
+            sh ./build_dist.sh -o build/bin/tailscale.exe  tailscale.com/cmd/tailscale
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-            sh ./build_dist.sh -o dist/tailscale-portable/tailscaled.exe tailscale.com/cmd/tailscaled
+            sh ./build_dist.sh -o build/bin/tailscaled.exe tailscale.com/cmd/tailscaled
 
-      - name: Add portable assets (proxy.conf, scripts, README)
-        run: |
-          set -eu
-          cp release/windows-portable/proxy.conf        dist/tailscale-portable/
-          cp release/windows-portable/start-tailscale.bat dist/tailscale-portable/
-          cp release/windows-portable/stop-tailscale.bat  dist/tailscale-portable/
-          cp release/windows-portable/README.txt         dist/tailscale-portable/
-          ls -la dist/tailscale-portable
-
-      - name: Package zip + checksum
+      - name: Assemble packages
         id: pkg
         run: |
           set -eu
-          name="tailscale-portable-windows-amd64-${{ steps.ver.outputs.short }}"
-          ( cd dist && mv tailscale-portable "${name}" && zip -r "${name}.zip" "${name}" )
-          ( cd dist && sha256sum "${name}.zip" > "${name}.zip.sha256" )
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          ver="${{ steps.ver.outputs.short }}"
+          mkdir -p dist
 
-      - name: Upload artifact
+          # Portable
+          portable="tailscale-mod-portable-windows-amd64-${ver}"
+          mkdir -p "dist/${portable}"
+          cp build/bin/tailscale.exe build/bin/tailscaled.exe "dist/${portable}/"
+          cp release/windows-portable/proxy.conf \
+             release/windows-portable/start-tailscale.bat \
+             release/windows-portable/stop-tailscale.bat \
+             release/windows-portable/README.txt "dist/${portable}/"
+          ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
+
+          # Installer
+          installer="tailscale-mod-installer-windows-amd64-${ver}"
+          mkdir -p "dist/${installer}"
+          cp build/bin/tailscale.exe build/bin/tailscaled.exe "dist/${installer}/"
+          cp release/windows-installer/install.ps1 \
+             release/windows-installer/uninstall.ps1 \
+             release/windows-installer/install.bat \
+             release/windows-installer/uninstall.bat \
+             release/windows-installer/proxy.conf \
+             release/windows-installer/README.txt "dist/${installer}/"
+          ( cd dist && zip -rq "${installer}.zip" "${installer}" && sha256sum "${installer}.zip" > "${installer}.zip.sha256" )
+
+          ls -la dist
+          echo "portable=${portable}" >> "$GITHUB_OUTPUT"
+          echo "installer=${installer}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.pkg.outputs.name }}
+          name: tailscale-mod-windows-amd64-${{ steps.ver.outputs.short }}
           path: |
-            dist/${{ steps.pkg.outputs.name }}.zip
-            dist/${{ steps.pkg.outputs.name }}.zip.sha256
+            dist/*.zip
+            dist/*.zip.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish rolling pre-release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG="windows-latest"
+          TITLE="Tailscale (mod) Windows - ${{ steps.ver.outputs.short }}"
+          # Single-quoted heredoc: GitHub substitutes ${{ }} before bash runs,
+          # and bash leaves backticks/dollar signs untouched.
+          cat > dist/notes.md <<'EOF'
+          Automated Windows (amd64) build of Tailscale (mod).
+
+          Version: ${{ steps.ver.outputs.long }} (commit ${{ github.sha }})
+
+          Assets:
+          - **installer** zip - registers the `tailscaled` Windows service and installs a default `proxy.conf` to `C:\ProgramData\Tailscale`.
+          - **portable** zip - unzip and run, no install needed; `proxy.conf` lives next to the binaries.
+
+          `proxy.conf` ships disabled by default (behaves like stock Tailscale until you edit it).
+          EOF
+          # Recreate the rolling release so the tag points at this commit.
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" --notes-file dist/notes.md --prerelease --target "$GITHUB_SHA" \
+            dist/*.zip dist/*.zip.sha256
