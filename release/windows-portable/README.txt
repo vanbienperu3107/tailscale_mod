@@ -28,9 +28,14 @@ Quick start
   3. To stop, double-click "stop-tailscale.bat" (or close the tailscaled
      window).
 
-Note: Administrator rights are required to run Tailscale on Windows. The build
-is "portable" in the sense that nothing is installed and all state lives in
-this folder - but it still elevates when you start it.
+Note: Administrator rights are required (Windows needs them to create the
+Tailscale control pipe). The build is "portable" in the sense that nothing is
+installed and all state lives in this folder - but it still elevates on start.
+
+Networking mode: the portable build runs in "userspace-networking" mode, so it
+needs no TUN driver (no wintun.dll) and starts reliably from any folder. You
+can reach your tailnet from this app. To route ALL of this PC's traffic through
+Tailscale (a full system VPN), use the installer build instead.
 
 Using the proxy (proxy.conf)
 ----------------------------

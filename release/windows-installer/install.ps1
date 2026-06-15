@@ -25,6 +25,11 @@ Write-Host "Installing Tailscale to: $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Force (Join-Path $src "tailscale.exe")  $InstallDir
 Copy-Item -Force (Join-Path $src "tailscaled.exe") $InstallDir
+# wintun.dll is required for the full-VPN TUN adapter; it must sit next to
+# tailscaled.exe (tailscaled loads <exe dir>\wintun.dll).
+if (Test-Path (Join-Path $src "wintun.dll")) {
+    Copy-Item -Force (Join-Path $src "wintun.dll") $InstallDir
+}
 
 # --- Default proxy.conf in the daemon's default state dir (don't overwrite) ---
 $dataDir  = Join-Path $env:ProgramData "Tailscale"

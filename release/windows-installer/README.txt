@@ -12,7 +12,8 @@ Install
   1. Unzip this folder.
   2. Double-click "install.bat" (it will ask for Administrator rights).
      This will:
-       - copy tailscale.exe / tailscaled.exe to "%ProgramFiles%\Tailscale",
+       - copy tailscale.exe / tailscaled.exe / wintun.dll to
+         "%ProgramFiles%\Tailscale" (wintun.dll powers the VPN adapter),
        - register and start the "Tailscale" Windows service,
        - create %ProgramData%\Tailscale\proxy.conf (only if not already there),
        - add the install folder to the system PATH.

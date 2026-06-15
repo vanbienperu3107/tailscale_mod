@@ -1,9 +1,10 @@
 name: Build Windows (portable + installer)
 
-# On every push to main (and via manual dispatch), cross-compile Windows
-# (amd64) and publish two zips - a portable build and a service installer -
-# both bundling a default proxy.conf. The zips are uploaded as run artifacts
-# and attached to a rolling pre-release tagged "windows-latest".
+# On every push to main (and via manual dispatch):
+#   1. build  - cross-compile Windows amd64, assemble portable + installer zips
+#   2. smoke-test - on a real Windows runner, start tailscaled and verify the
+#                   daemon comes up and reads proxy.conf
+#   3. release - only if the smoke test passes, publish the rolling pre-release
 
 on:
   push:
@@ -23,6 +24,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      short: ${{ steps.ver.outputs.short }}
+      long: ${{ steps.ver.outputs.long }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,6 +56,14 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
             sh ./build_dist.sh -o build/bin/tailscaled.exe tailscale.com/cmd/tailscaled
 
+      - name: Fetch wintun.dll (for the full-VPN installer)
+        run: |
+          set -eu
+          curl -fL --retry 3 -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          mkdir -p build/wintun
+          unzip -j wintun.zip 'wintun/bin/amd64/wintun.dll' -d build/wintun
+          ls -la build/wintun
+
       - name: Assemble packages
         id: pkg
         run: |
@@ -59,7 +71,7 @@ jobs:
           ver="${{ steps.ver.outputs.short }}"
           mkdir -p dist
 
-          # Portable
+          # Portable (userspace mode - no wintun needed)
           portable="tailscale-mod-portable-windows-amd64-${ver}"
           mkdir -p "dist/${portable}"
           cp build/bin/tailscale.exe build/bin/tailscaled.exe "dist/${portable}/"
@@ -69,10 +81,11 @@ jobs:
              release/windows-portable/README.txt "dist/${portable}/"
           ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
 
-          # Installer
+          # Installer (full VPN service - bundles wintun.dll)
           installer="tailscale-mod-installer-windows-amd64-${ver}"
           mkdir -p "dist/${installer}"
           cp build/bin/tailscale.exe build/bin/tailscaled.exe "dist/${installer}/"
+          cp build/wintun/wintun.dll "dist/${installer}/"
           cp release/windows-installer/install.ps1 \
              release/windows-installer/uninstall.ps1 \
              release/windows-installer/install.bat \
@@ -82,42 +95,112 @@ jobs:
           ( cd dist && zip -rq "${installer}.zip" "${installer}" && sha256sum "${installer}.zip" > "${installer}.zip.sha256" )
 
           ls -la dist
-          echo "portable=${portable}" >> "$GITHUB_OUTPUT"
-          echo "installer=${installer}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload build artifacts
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tailscale-mod-windows-amd64-${{ steps.ver.outputs.short }}
+          name: windows-build
           path: |
             dist/*.zip
             dist/*.zip.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish rolling pre-release
-        if: github.event_name != 'pull_request'
+  smoke-test:
+    name: Smoke test on Windows runner
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: dist
+
+      - name: Start tailscaled (userspace) and verify it works
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
+          Write-Host "Testing package: $($zip.Name)"
+          Expand-Archive -Path $zip.FullName -DestinationPath app -Force
+          $dir = (Get-ChildItem app -Directory | Select-Object -First 1).FullName
+          $tailscaled = Join-Path $dir "tailscaled.exe"
+          $tailscale  = Join-Path $dir "tailscale.exe"
+
+          # Enable proxy.conf with a dummy proxy to prove the feature is read.
+          $proxy = Join-Path $dir "proxy.conf"
+          '{ "enabled": true, "httpProxy": "http://127.0.0.1:38271", "httpsProxy": "http://127.0.0.1:38271" }' | Set-Content -Encoding ascii $proxy
+          $env:TS_PROXY_CONF = $proxy
+
+          $state = Join-Path $dir "state"
+          New-Item -ItemType Directory -Force $state | Out-Null
+          $out = Join-Path $dir "tsd.out.log"
+          $err = Join-Path $dir "tsd.err.log"
+
+          Write-Host "Starting tailscaled in userspace mode..."
+          $p = Start-Process -FilePath $tailscaled -PassThru -WindowStyle Hidden `
+            -ArgumentList "--tun=userspace-networking","--statedir=$state","--verbose=1" `
+            -RedirectStandardOutput $out -RedirectStandardError $err
+
+          try {
+            $up = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Seconds 1
+              $s = (& $tailscale status 2>&1 | Out-String)
+              if ($s -notmatch "failed to connect") { $up = $true; Write-Host "Daemon reachable after ~$i s"; break }
+            }
+            # Force a control contact so the proxy resolver runs (bounded wait).
+            (& $tailscale up --timeout=8s 2>&1 | Out-String) | Write-Host
+            Start-Sleep -Seconds 2
+
+            $log = ((Get-Content $out -ErrorAction SilentlyContinue) + (Get-Content $err -ErrorAction SilentlyContinue)) -join "`n"
+            Write-Host "----- tailscaled log (last 40 lines) -----"
+            ($log -split "`n" | Select-Object -Last 40) | ForEach-Object { Write-Host $_ }
+            Write-Host "------------------------------------------"
+
+            if (-not $up) { throw "FAIL: tailscaled LocalAPI never became reachable" }
+            if ($log -notmatch "proxy config from proxy.conf|loaded proxy config from") {
+              throw "FAIL: proxy.conf was not loaded by tailscaled"
+            }
+            Write-Host "PASS: daemon came up and proxy.conf was loaded."
+          }
+          finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+
+  release:
+    name: Publish rolling pre-release
+    needs: smoke-test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: dist
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           TAG="windows-latest"
-          TITLE="Tailscale (mod) Windows - ${{ steps.ver.outputs.short }}"
-          # Single-quoted heredoc keeps backticks/dollar signs literal for bash;
-          # Actions still expands its own expression tokens first.
-          cat > dist/notes.md <<'EOF'
+          TITLE="Tailscale (mod) Windows - ${{ needs.build.outputs.short }}"
+          cat > notes.md <<'EOF'
           Automated Windows (amd64) build of Tailscale (mod).
 
-          Version: ${{ steps.ver.outputs.long }} (commit ${{ github.sha }})
+          Version: ${{ needs.build.outputs.long }} (commit ${{ github.sha }})
+          Verified on a Windows runner: tailscaled starts and reads proxy.conf.
 
           Assets:
-          - **installer** zip - registers the `tailscaled` Windows service and installs a default `proxy.conf` to `C:\ProgramData\Tailscale`.
-          - **portable** zip - unzip and run, no install needed; `proxy.conf` lives next to the binaries.
+          - **installer** zip - registers the `tailscaled` Windows service (full VPN, bundles `wintun.dll`) and installs a default `proxy.conf` to `C:\ProgramData\Tailscale`.
+          - **portable** zip - unzip and run in userspace mode, no install needed; `proxy.conf` lives next to the binaries.
 
           `proxy.conf` ships disabled by default (behaves like stock Tailscale until you edit it).
           EOF
-          # Recreate the rolling release so the tag points at this commit.
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "$TITLE" --notes-file dist/notes.md --prerelease --target "$GITHUB_SHA" \
+            --title "$TITLE" --notes-file notes.md --prerelease --target "$GITHUB_SHA" \
             dist/*.zip dist/*.zip.sha256
