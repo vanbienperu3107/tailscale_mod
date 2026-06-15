@@ -1,0 +1,3 @@
+# The setup script runs on Linux; force LF so it never gets CRLF (which would
+# break the shebang with a "bad interpreter: ...^M" error).
+*.sh text eol=lf
