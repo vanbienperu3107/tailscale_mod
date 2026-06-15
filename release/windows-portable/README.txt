@@ -46,6 +46,11 @@ variables so Tailscale works well behind an HTTP proxy that blocks UDP:
 If you are on a normal network where UDP works, remove those two lines from
 start-tailscale.bat for faster direct (peer-to-peer) connections.
 
+Staying connected: start-tailscale.bat logs in with "tailscale up --unattended"
+(Unattended Mode). Without it, tailscaled disconnects as soon as the start
+script's CLI commands exit (you would connect for a moment, then drop). Keep the
+"tailscaled" window open - that is the daemon; closing it stops Tailscale.
+
 Using the proxy (proxy.conf)
 ----------------------------
 The daemon reads "proxy.conf" from this folder (via the TS_PROXY_CONF

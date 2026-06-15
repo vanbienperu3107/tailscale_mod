@@ -40,7 +40,9 @@ echo Waiting for the daemon to come up...
 set /a n=0
 :trylogin
 timeout /t 2 /nobreak >nul
-tailscale.exe up
+REM --unattended (ForceDaemon) keeps Tailscale connected after this CLI client
+REM exits; without it, tailscaled disconnects when no client is attached.
+tailscale.exe up --unattended
 if %errorlevel% equ 0 goto loggedin
 set /a n+=1
 if %n% lss 10 goto trylogin
