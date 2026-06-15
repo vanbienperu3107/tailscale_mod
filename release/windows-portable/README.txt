@@ -37,6 +37,15 @@ needs no TUN driver (no wintun.dll) and starts reliably from any folder. You
 can reach your tailnet from this app. To route ALL of this PC's traffic through
 Tailscale (a full system VPN), use the installer build instead.
 
+Proxy networks (UDP blocked): start-tailscale.bat sets two environment
+variables so Tailscale works well behind an HTTP proxy that blocks UDP:
+  TS_DEBUG_ALWAYS_USE_DERP=1   forces all traffic over DERP (TCP via the proxy)
+                              instead of trying direct UDP (which is blocked).
+  TS_DERP_KEEPALIVE_SECS=25    pings the DERP relay every 25s so the proxy does
+                              not close the idle CONNECT tunnel (reduces drops).
+If you are on a normal network where UDP works, remove those two lines from
+start-tailscale.bat for faster direct (peer-to-peer) connections.
+
 Using the proxy (proxy.conf)
 ----------------------------
 The daemon reads "proxy.conf" from this folder (via the TS_PROXY_CONF

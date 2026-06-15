@@ -17,6 +17,11 @@ REM Portable: keep state next to the binaries and read proxy.conf from here.
 REM TS_PROXY_CONF is exported here and inherited by the tailscaled child below.
 set "TS_PROXY_CONF=%~dp0proxy.conf"
 set "TS_LOGS_DIR=%~dp0logs"
+REM Behind an HTTP proxy, UDP is usually blocked, so force all traffic over DERP
+REM (TCP via the proxy) and keep the relay tunnel alive so the proxy does not
+REM close it for inactivity. Remove these two lines on a network where UDP works.
+set "TS_DEBUG_ALWAYS_USE_DERP=1"
+set "TS_DERP_KEEPALIVE_SECS=25"
 if not exist "%~dp0state" mkdir "%~dp0state"
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 

@@ -19,6 +19,7 @@ import (
 	"github.com/tailscale/wireguard-go/conn"
 	"tailscale.com/derp"
 	"tailscale.com/derp/derphttp"
+	"tailscale.com/envknob"
 	"tailscale.com/health"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/netcheck"
@@ -461,6 +462,9 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan de
 
 	go c.runDerpReader(ctx, regionID, dc, wg, startGate)
 	go c.runDerpWriter(ctx, dc, ch, wg, startGate)
+	if every := time.Duration(derpKeepAliveSecs()) * time.Second; every > 0 {
+		go c.runDerpKeepAlive(ctx, regionID, dc, every)
+	}
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -675,6 +679,36 @@ type derpWriteRequest struct {
 	pubKey  key.NodePublic
 	b       []byte // copied; ownership passed to receiver
 	isDisco bool
+}
+
+// derpKeepAliveSecs reads TS_DERP_KEEPALIVE_SECS. When >0, the client
+// proactively pings each active DERP connection that often. This keeps an
+// intermediary (e.g. a corporate HTTP proxy that tunnels DERP over CONNECT)
+// from closing the connection for inactivity. 0 (default) disables it; in the
+// common direct-UDP case it isn't needed.
+var derpKeepAliveSecs = envknob.RegisterInt("TS_DERP_KEEPALIVE_SECS")
+
+// runDerpKeepAlive periodically pings the DERP connection dc until ctx is done,
+// to keep the underlying TCP/proxy tunnel from being closed for inactivity.
+// It's only started when TS_DERP_KEEPALIVE_SECS > 0.
+func (c *Conn) runDerpKeepAlive(ctx context.Context, regionID int, dc *derphttp.Client, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := dc.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				// Let the reader loop notice and reconnect; just stop pinging.
+				c.logf("magicsock: derp-%d keepalive ping failed: %v", regionID, err)
+				return
+			}
+		}
+	}
 }
 
 // runDerpWriter runs in a goroutine for the life of a DERP
