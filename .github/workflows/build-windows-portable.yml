@@ -164,9 +164,12 @@ jobs:
               throw "FAIL: proxy.conf was not loaded by tailscaled"
             }
             Write-Host "PASS: daemon came up and proxy.conf was loaded."
+            # 'tailscale up' above exits non-zero on purpose (dummy proxy); make
+            # sure that does not become this step's exit code.
+            exit 0
           }
           finally {
-            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           }
 
   release:
