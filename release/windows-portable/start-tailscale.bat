@@ -16,12 +16,15 @@ cd /d "%~dp0"
 REM Portable: keep state next to the binaries and read proxy.conf from here.
 REM TS_PROXY_CONF is exported here and inherited by the tailscaled child below.
 set "TS_PROXY_CONF=%~dp0proxy.conf"
+set "TS_LOGS_DIR=%~dp0logs"
 if not exist "%~dp0state" mkdir "%~dp0state"
+if not exist "%~dp0logs" mkdir "%~dp0logs"
 
 echo ============================================================
 echo  Tailscale Portable (userspace-networking mode)
 echo   State dir  : %~dp0state
 echo   Proxy conf : %TS_PROXY_CONF%
+echo   Logs dir   : %TS_LOGS_DIR%
 echo ============================================================
 echo.
 echo Starting tailscaled in a separate window...

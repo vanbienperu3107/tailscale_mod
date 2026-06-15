@@ -48,3 +48,10 @@ Behavior:
 the file is created under %ProgramData% which is writable only by admins.
 
 After editing proxy.conf, apply it with:   Restart-Service Tailscale
+
+Logs (for debugging)
+--------------------
+The service writes full logs to:
+  %ProgramData%\Tailscale\Logs\tailscale-service-*.txt
+Open the newest .txt file and look for "tshttpproxy:" and "control:" lines when
+diagnosing proxy/connectivity problems.

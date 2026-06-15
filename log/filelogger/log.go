@@ -34,7 +34,12 @@ func New(fileBasePrefix, logID string, logf logger.Logf) logger.Logf {
 	if logf == nil {
 		panic("nil logf")
 	}
-	dir := filepath.Join(os.Getenv("ProgramData"), "Tailscale", "Logs")
+	// Write log files to TS_LOGS_DIR if set (used by portable builds to keep
+	// logs next to the binaries); otherwise default to %ProgramData%\Tailscale\Logs.
+	dir := os.Getenv("TS_LOGS_DIR")
+	if dir == "" {
+		dir = filepath.Join(os.Getenv("ProgramData"), "Tailscale", "Logs")
+	}
 
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		log.Printf("failed to create local log directory; not writing logs to disk: %v", err)

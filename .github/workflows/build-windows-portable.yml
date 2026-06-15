@@ -133,6 +133,11 @@ jobs:
           '{ "enabled": true, "httpProxy": "http://127.0.0.1:38271", "httpsProxy": "http://127.0.0.1:38271" }' | Set-Content -Encoding ascii $proxy
           $env:TS_PROXY_CONF = $proxy
 
+          # Write logs to a "logs" subfolder (verifies the TS_LOGS_DIR feature).
+          $logs = Join-Path $dir "logs"
+          New-Item -ItemType Directory -Force $logs | Out-Null
+          $env:TS_LOGS_DIR = $logs
+
           $state = Join-Path $dir "state"
           New-Item -ItemType Directory -Force $state | Out-Null
           $out = Join-Path $dir "tsd.out.log"
@@ -163,7 +168,10 @@ jobs:
             if ($log -notmatch "proxy config from proxy.conf|loaded proxy config from") {
               throw "FAIL: proxy.conf was not loaded by tailscaled"
             }
-            Write-Host "PASS: daemon came up and proxy.conf was loaded."
+            $logFiles = Get-ChildItem $logs -Filter "*.txt" -ErrorAction SilentlyContinue
+            if (-not $logFiles) { throw "FAIL: no log file written to TS_LOGS_DIR ($logs)" }
+            Write-Host "Log file(s) in TS_LOGS_DIR: $($logFiles.Name -join ', ')"
+            Write-Host "PASS: daemon came up, proxy.conf loaded, logs written to TS_LOGS_DIR."
             # 'tailscale up' above exits non-zero on purpose (dummy proxy); make
             # sure that does not become this step's exit code.
             exit 0

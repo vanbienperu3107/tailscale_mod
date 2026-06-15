@@ -71,3 +71,11 @@ You can confirm it is in effect in the tailscaled window; you will see lines
 like:
   tshttpproxy: using proxy config from proxy.conf
   tshttpproxy: using proxy "http://proxy.example.com:8080" for URL: ...
+
+Logs (for debugging)
+--------------------
+Besides the live tailscaled window, full logs are written to the "logs"
+subfolder next to the binaries (start-tailscale.bat points TS_LOGS_DIR there):
+  logs\tailscale-service-YYYYMMDDThhmmss-*.txt
+Open the newest .txt file and look for "tshttpproxy:" and "control:" lines when
+diagnosing proxy/connectivity problems.
