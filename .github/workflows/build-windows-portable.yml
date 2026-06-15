@@ -13,6 +13,11 @@ on:
       - "docs/**"
       - "**/*.md"
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version label (e.g. 1.0). Leave blank to auto-version from git."
+        required: false
+        default: ""
 
 permissions:
   contents: write # needed to publish the rolling release
@@ -43,6 +48,13 @@ jobs:
         id: ver
         run: |
           eval "$(go run ./cmd/mkversion)"
+          # A manual workflow_dispatch can override the version label (e.g. "1.0")
+          # for a clean, human-friendly release tag. Otherwise auto-version from git.
+          CUSTOM="${{ github.event.inputs.release_version }}"
+          if [ -n "${CUSTOM}" ]; then
+            VERSION_SHORT="${CUSTOM}"
+            VERSION_LONG="${CUSTOM}"
+          fi
           echo "short=${VERSION_SHORT}" >> "$GITHUB_OUTPUT"
           echo "long=${VERSION_LONG}" >> "$GITHUB_OUTPUT"
           echo "Building version ${VERSION_LONG}"
