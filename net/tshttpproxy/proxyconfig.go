@@ -86,12 +86,15 @@ func loadProxyConfig() *ProxyConfig {
 
 	path := proxyConfigPath()
 	if path == "" {
+		log.Printf("tshttpproxy: no proxy.conf path on this platform; using environment proxy settings")
 		return nil
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if os.IsNotExist(err) {
+			log.Printf("tshttpproxy: no proxy.conf at %q; using environment proxy settings", path)
+		} else {
 			log.Printf("tshttpproxy: error reading %s: %v", path, err)
 		}
 		return nil
