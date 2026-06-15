@@ -182,7 +182,7 @@ jobs:
 
   release:
     name: Publish versioned release
-    needs: smoke-test
+    needs: [build, smoke-test] # build is required to read its version outputs
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
