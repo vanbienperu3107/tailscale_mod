@@ -68,7 +68,7 @@ jobs:
         id: pkg
         run: |
           set -eu
-          ver="${{ steps.ver.outputs.short }}"
+          ver="${{ steps.ver.outputs.long }}"
           mkdir -p dist
 
           # Portable (userspace mode - no wintun needed)
@@ -181,7 +181,7 @@ jobs:
           }
 
   release:
-    name: Publish rolling pre-release
+    name: Publish versioned release
     needs: smoke-test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -197,8 +197,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          TAG="windows-latest"
-          TITLE="Tailscale (mod) Windows - ${{ needs.build.outputs.short }}"
+          TAG="v${{ needs.build.outputs.long }}"
+          TITLE="Tailscale (mod) Windows ${TAG}"
           cat > notes.md <<'EOF'
           Automated Windows (amd64) build of Tailscale (mod).
 
@@ -211,7 +211,9 @@ jobs:
 
           `proxy.conf` ships disabled by default (behaves like stock Tailscale until you edit it).
           EOF
+          # Each build gets its own version tag; mark the newest as "Latest".
+          # Delete+recreate makes re-running the same commit idempotent.
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "$TITLE" --notes-file notes.md --prerelease --target "$GITHUB_SHA" \
+            --title "$TITLE" --notes-file notes.md --latest --target "$GITHUB_SHA" \
             dist/*.zip dist/*.zip.sha256
