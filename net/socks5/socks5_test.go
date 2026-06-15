@@ -5,11 +5,13 @@ package socks5
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -285,5 +287,70 @@ func TestUDP(t *testing.T) {
 		if !bytes.Equal(requestBody, responseBody) {
 			t.Fatalf("got: %q want: %q", responseBody, requestBody)
 		}
+	}
+}
+
+func TestDialTimeoutDefault(t *testing.T) {
+	var s Server
+	if got := s.dialTimeout(); got != defaultDialTimeout {
+		t.Errorf("unset dialTimeout = %v, want default %v", got, defaultDialTimeout)
+	}
+	s.DialTimeout = 90 * time.Second
+	if got := s.dialTimeout(); got != 90*time.Second {
+		t.Errorf("dialTimeout = %v, want 90s", got)
+	}
+	s.DialTimeout = -5 * time.Second
+	if got := s.dialTimeout(); got != defaultDialTimeout {
+		t.Errorf("negative dialTimeout = %v, want default %v", got, defaultDialTimeout)
+	}
+}
+
+// TestConnectUsesDialTimeout verifies a CONNECT request dials the backend with
+// a context whose deadline reflects Server.DialTimeout (the configurable budget
+// that replaced the old hard-coded 5s).
+func TestConnectUsesDialTimeout(t *testing.T) {
+	const want = 1234 * time.Millisecond
+	deadlineCh := make(chan time.Duration, 1)
+	srv := &Server{
+		DialTimeout: want,
+		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dl, ok := ctx.Deadline()
+			if !ok {
+				deadlineCh <- 0
+			} else {
+				deadlineCh <- time.Until(dl)
+			}
+			// Fail the dial; we only care about the context deadline.
+			return nil, errors.New("test: refusing dial")
+		},
+	}
+	ln, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go srv.Serve(ln)
+
+	d, err := proxy.SOCKS5("tcp", ln.Addr().String(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Expected to fail (backend dialer returns an error), but it drives handleTCP.
+	if c, err := d.Dial("tcp", "example.com:80"); err == nil {
+		c.Close()
+		t.Fatal("expected SOCKS5 dial to fail")
+	}
+
+	select {
+	case got := <-deadlineCh:
+		if got <= 0 {
+			t.Fatal("dial context had no deadline")
+		}
+		// The remaining time should be close to want (minus protocol handshake).
+		if got < want/2 || got > want {
+			t.Errorf("dial context deadline ~%v remaining, want close to %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend dialer was never called")
 	}
 }

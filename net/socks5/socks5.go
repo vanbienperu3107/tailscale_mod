@@ -88,6 +88,16 @@ const (
 	readTimeout = 5 * time.Second
 )
 
+// defaultDialTimeout is how long the server waits to establish the outbound
+// connection for a CONNECT request when Server.DialTimeout is unset.
+//
+// It is intentionally generous. On relayed/proxied paths (e.g. Tailscale DERP
+// reached through an HTTP proxy, where direct UDP is unavailable) the first TCP
+// handshake to a peer can take several seconds, especially when the relay path
+// is cold or reconnecting. The original hard-coded 5s budget made SOCKS5
+// connections fail intermittently on such networks.
+const defaultDialTimeout = 30 * time.Second
+
 // Server is a SOCKS5 proxy server.
 type Server struct {
 	// Logf optionally specifies the logger to use.
@@ -101,6 +111,12 @@ type Server struct {
 	// Username and Password, if set, are the credential clients must provide.
 	Username string
 	Password string
+
+	// DialTimeout optionally specifies how long to wait when establishing the
+	// outbound connection for a CONNECT request. If zero or negative,
+	// defaultDialTimeout (30s) is used. Increase this on slow or relayed
+	// networks where peer handshakes routinely take longer.
+	DialTimeout time.Duration
 }
 
 func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -110,6 +126,14 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		dial = dialer.DialContext
 	}
 	return dial(ctx, network, addr)
+}
+
+// dialTimeout returns the configured outbound dial timeout, or the default.
+func (s *Server) dialTimeout() time.Duration {
+	if s.DialTimeout > 0 {
+		return s.DialTimeout
+	}
+	return defaultDialTimeout
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -206,7 +230,7 @@ func (c *Conn) handleRequest() error {
 }
 
 func (c *Conn) handleTCP() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), c.srv.dialTimeout())
 	defer cancel()
 	srv, err := c.srv.dial(
 		ctx,

@@ -59,6 +59,12 @@ jobs:
           echo "long=${VERSION_LONG}" >> "$GITHUB_OUTPUT"
           echo "Building version ${VERSION_LONG}"
 
+      - name: Run unit tests (modified packages)
+        run: |
+          set -eu
+          # Gate the release on the tests for the packages this fork modifies.
+          go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
+
       - name: Build Windows binaries (amd64)
         run: |
           set -eu

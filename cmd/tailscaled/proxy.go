@@ -16,13 +16,21 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
+	"time"
 
+	"tailscale.com/envknob"
 	"tailscale.com/feature"
 	"tailscale.com/net/proxymux"
 	"tailscale.com/net/socks5"
 	"tailscale.com/net/tsdial"
 	"tailscale.com/types/logger"
 )
+
+// socks5DialTimeoutSecs overrides, in seconds, how long the SOCKS5 server waits
+// to establish an outbound connection for a CONNECT request. 0 (unset) uses the
+// socks5 package default (30s). Raise it on slow/relayed networks (e.g. DERP
+// behind a proxy) where peer handshakes routinely exceed the default.
+var socks5DialTimeoutSecs = envknob.RegisterInt("TS_SOCKS5_DIAL_TIMEOUT_SECS")
 
 func init() {
 	hookRegisterOutboundProxyFlags.Set(registerOutboundProxyFlags)
@@ -98,6 +106,9 @@ func mkProxyStartFunc(socksListener, httpListener net.Listener) proxyStartFunc {
 			ss := &socks5.Server{
 				Logf:   logger.WithPrefix(logf, "socks5: "),
 				Dialer: dialer.UserDial,
+			}
+			if secs := socks5DialTimeoutSecs(); secs > 0 {
+				ss.DialTimeout = time.Duration(secs) * time.Second
 			}
 			go func() {
 				log.Fatalf("SOCKS5 server exited: %v", ss.Serve(socksListener))
