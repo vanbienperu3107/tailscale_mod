@@ -136,6 +136,9 @@ func configFromFile() *httpproxy.Config {
 	}
 	if fc.Enabled != nil && !*fc.Enabled {
 		// Explicitly disabled → empty config (no proxy, env ignored).
+		if fc.HTTPProxy != "" || fc.HTTPSProxy != "" {
+			log.Printf("tshttpproxy: proxy.conf has proxy values but enabled=false; proxying is OFF. Set \"enabled\": true to use them.")
+		}
 		return &httpproxy.Config{}
 	}
 	// Enabled explicitly or implicitly (field omitted): use the file's values.

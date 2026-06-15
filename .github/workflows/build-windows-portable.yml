@@ -168,10 +168,16 @@ jobs:
             if ($log -notmatch "proxy config from proxy.conf|loaded proxy config from") {
               throw "FAIL: proxy.conf was not loaded by tailscaled"
             }
+            # Prove traffic is actually routed through the configured proxy:
+            # with enabled=true tailscaled must dial the proxy (127.0.0.1:38271),
+            # not the control/log servers directly.
+            if ($log -notmatch "proxyconnect|127\.0\.0\.1:38271") {
+              throw "FAIL: tailscaled did not route through the proxy from proxy.conf"
+            }
             $logFiles = Get-ChildItem $logs -Filter "*.txt" -ErrorAction SilentlyContinue
             if (-not $logFiles) { throw "FAIL: no log file written to TS_LOGS_DIR ($logs)" }
             Write-Host "Log file(s) in TS_LOGS_DIR: $($logFiles.Name -join ', ')"
-            Write-Host "PASS: daemon came up, proxy.conf loaded, logs written to TS_LOGS_DIR."
+            Write-Host "PASS: daemon up, proxy.conf loaded AND used (traffic routed via proxy), logs written to TS_LOGS_DIR."
             # 'tailscale up' above exits non-zero on purpose (dummy proxy); make
             # sure that does not become this step's exit code.
             exit 0
