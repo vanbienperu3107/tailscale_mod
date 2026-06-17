@@ -82,6 +82,19 @@ jobs:
           unzip -j wintun.zip 'wintun/bin/amd64/wintun.dll' -d build/wintun
           ls -la build/wintun
 
+      - name: Fetch gost (LAN-proxy helper, bundled into portable)
+        run: |
+          set -eu
+          # gost = small portable proxy used by the LAN-proxy helper scripts so a
+          # portable (userspace) node can reach a remote node's LAN (e.g. 10.120.x.x)
+          # without installing anything. Pinned version for reproducible builds.
+          curl -fL --retry 3 -o gost.zip \
+            https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_windows_amd64.zip
+          mkdir -p build/gost
+          unzip -o gost.zip gost.exe -d build/gost
+          rm -f gost.zip
+          ls -la build/gost
+
       - name: Assemble packages
         id: pkg
         run: |
@@ -97,6 +110,13 @@ jobs:
              release/windows-portable/start-tailscale.bat \
              release/windows-portable/stop-tailscale.bat \
              release/windows-portable/README.txt "dist/${portable}/"
+          # LAN-proxy feature: bundle gost + helper scripts so a portable node can
+          # reach a remote node's LAN (e.g. 10.120.x.x) through another portable node.
+          cp build/gost/gost.exe "dist/${portable}/"
+          cp release/windows-portable/itop-share-proxy.bat \
+             release/windows-portable/votam-use-proxy.bat \
+             release/windows-portable/tailscale-proxy.pac \
+             release/windows-portable/LAN-PROXY-README.txt "dist/${portable}/"
           ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
 
           # Installer (full VPN service - bundles wintun.dll)
@@ -204,6 +224,36 @@ jobs:
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           }
 
+      - name: Verify gost + LAN-proxy helpers bundled and working
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath gapp -Force
+          $dir = (Get-ChildItem gapp -Directory | Select-Object -First 1).FullName
+
+          # 1) Files present in the portable package
+          $gost = Join-Path $dir "gost.exe"
+          if (-not (Test-Path $gost)) { throw "FAIL: gost.exe not bundled in portable zip" }
+          foreach ($f in @("itop-share-proxy.bat","votam-use-proxy.bat","tailscale-proxy.pac","LAN-PROXY-README.txt")) {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "FAIL: LAN-proxy file missing: $f" }
+          }
+          Write-Host "gost.exe + helper scripts present. gost version:"
+          & $gost -V
+
+          # 2) Functional: gost as an HTTP proxy actually proxies a request.
+          $p = Start-Process -FilePath $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18080'
+          try {
+            Start-Sleep -Seconds 3
+            $code = (curl.exe -s -o NUL -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18080 http://example.com)
+            Write-Host "Through gost HTTP proxy: example.com -> HTTP $code"
+            if ($code -ne "200") { throw "FAIL: gost did not proxy the request (got '$code')" }
+            Write-Host "PASS: gost.exe bundled, helper scripts present, and gost proxies HTTP."
+          }
+          finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          }
+
   release:
     name: Publish versioned release
     needs: [build, smoke-test] # build is required to read its version outputs
@@ -231,7 +281,7 @@ jobs:
 
           Assets:
           - **installer** zip - registers the `tailscaled` Windows service (full VPN, bundles `wintun.dll`) and installs a default `proxy.conf` to `C:\ProgramData\Tailscale`.
-          - **portable** zip - unzip and run in userspace mode, no install needed; `proxy.conf` lives next to the binaries.
+          - **portable** zip - unzip and run in userspace mode, no install needed; `proxy.conf` lives next to the binaries. Also bundles `gost.exe` + LAN-proxy helper scripts (`itop-share-proxy.bat`, `votam-use-proxy.bat`, `tailscale-proxy.pac`) to reach a remote node's LAN (e.g. 10.120.x.x) without installing anything - see `LAN-PROXY-README.txt`.
 
           `proxy.conf` ships disabled by default (behaves like stock Tailscale until you edit it).
           EOF
