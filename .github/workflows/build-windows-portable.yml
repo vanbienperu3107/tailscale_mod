@@ -258,6 +258,66 @@ jobs:
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           }
 
+      - name: Simulate LAN-proxy gost chain end-to-end
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath chainapp -Force
+          $dir = (Get-ChildItem chainapp -Directory | Select-Object -First 1).FullName
+          $gost = Join-Path $dir "gost.exe"
+          $procs = @()
+          try {
+            # "Internal site" (stands in for 10.x.x.x); returns HTTP 200.
+            $procs += Start-Process python -PassThru -WindowStyle Hidden -ArgumentList '-m','http.server','9000'
+            # itop side: HTTP proxy that reaches the target via the OS network.
+            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18080'
+            # Stand-in for the tailnet hop: a SOCKS5 server (== tailscale --socks5-server).
+            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','socks5://127.0.0.1:1055'
+            # votam side bridge: the EXACT chain shape used in start-tailscale.bat.
+            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18888','-F','socks5://127.0.0.1:1055','-F','http://127.0.0.1:18080'
+            Start-Sleep -Seconds 6
+            $code = (curl.exe -s -o NUL -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18888 http://127.0.0.1:9000)
+            Write-Host "Chain (votam-gost -> socks5 -> itop-gost -> target): HTTP $code"
+            if ($code -ne "200") { throw "FAIL: LAN-proxy gost chain broken (got '$code')" }
+            Write-Host "PASS: full gost chain works end-to-end (this is the votam->itop proxy path)."
+          }
+          finally {
+            foreach ($x in $procs) { if ($x -and -not $x.HasExited) { Stop-Process -Id $x.Id -Force -ErrorAction SilentlyContinue } }
+          }
+
+      - name: Real 'tailscale serve' against headscale (ephemeral node)
+        shell: pwsh
+        env:
+          HS_TEST_AUTHKEY: ${{ secrets.HS_TEST_AUTHKEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:HS_TEST_AUTHKEY) { Write-Host "No HS_TEST_AUTHKEY secret -> skipping real serve test."; exit 0 }
+          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath serveapp -Force
+          $dir = (Get-ChildItem serveapp -Directory | Select-Object -First 1).FullName
+          $tailscaled = Join-Path $dir "tailscaled.exe"
+          $tailscale  = Join-Path $dir "tailscale.exe"
+          $state = Join-Path $dir "state2"; New-Item -ItemType Directory -Force $state | Out-Null
+          $tsd = Start-Process $tailscaled -PassThru -WindowStyle Hidden -ArgumentList "--tun=userspace-networking","--socks5-server=127.0.0.1:1057","--statedir=$state"
+          try {
+            Start-Sleep -Seconds 4
+            Write-Host "Registering ephemeral node to headscale..."
+            (& $tailscale up --login-server=https://vpn2.hangocthanh.io.vn --authkey=$env:HS_TEST_AUTHKEY --hostname=ci-serve-test --accept-routes --timeout=90s 2>&1 | Out-String) | Write-Host
+            (& $tailscale status 2>&1 | Out-String) | Write-Host
+            Write-Host "Running the exact serve command from start-tailscale.bat..."
+            (& $tailscale serve --bg --tcp 18080 tcp://127.0.0.1:18080 2>&1 | Out-String) | Write-Host
+            $s = (& $tailscale serve status 2>&1 | Out-String)
+            Write-Host "serve status:`n$s"
+            if ($s -notmatch "18080") { throw "FAIL: tailscale serve did NOT expose port 18080 (serve+userspace may be unsupported on this build)" }
+            Write-Host "PASS: 'tailscale serve --tcp 18080' works with this build on headscale (userspace mode)."
+          }
+          finally {
+            try { & $tailscale serve reset 2>&1 | Out-Null } catch {}
+            try { & $tailscale logout 2>&1 | Out-Null } catch {}
+            if ($tsd -and -not $tsd.HasExited) { Stop-Process -Id $tsd.Id -Force -ErrorAction SilentlyContinue }
+          }
+
   release:
     name: Publish versioned release
     needs: [build, smoke-test] # build is required to read its version outputs
