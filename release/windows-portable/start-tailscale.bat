@@ -1,67 +1,94 @@
 @echo off
 setlocal EnableExtensions
-title Tailscale Portable
+title Tailscale Portable (self-host)
 
-REM Tailscale needs Administrator rights (to create its control named pipe).
-REM Self-elevate if not already running as admin.
+REM ===================== CAU HINH (sua o day) =====================
+REM Headscale server tu host (KHONG phai Tailscale Inc):
+set "HS_SERVER=https://vpn2.hangocthanh.io.vn"
+
+REM (Tuy chon) pre-auth key. De TRONG = dang nhap bang Google (OIDC).
+set "HS_AUTHKEY="
+
+REM LAN-proxy (truy cap mang noi bo cua may khac, vd 10.120.x.x):
+REM   itop  = may o trong mang do, CHIA SE
+REM   votam = may muon DUNG
+REM   (de trong) = tat, chi chay VPN binh thuong
+set "LAN_PROXY_MODE="
+
+REM SOCKS5 cuc bo (userspace + LAN-proxy).
+set "SOCKS_ADDR=127.0.0.1:1055"
+REM (cho votam) IP tailnet + port cua may itop chia se:
+set "ITOP_TS_IP=100.64.0.1"
+set "PROXY_PORT=18080"
+REM ===============================================================
+
+REM Tailscale can quyen admin (tao named pipe). Tu nang quyen neu chua co.
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo Requesting administrator privileges...
     powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
     exit /b
 )
-
 cd /d "%~dp0"
 
-REM Portable: keep state next to the binaries and read proxy.conf from here.
-REM TS_PROXY_CONF is exported here and inherited by the tailscaled child below.
+REM Portable: state + proxy.conf + logs nam canh binaries.
 set "TS_PROXY_CONF=%~dp0proxy.conf"
 set "TS_LOGS_DIR=%~dp0logs"
-REM Behind an HTTP proxy, UDP is usually blocked, so force all traffic over DERP
-REM (TCP via the proxy) and keep the relay tunnel alive so the proxy does not
-REM close it for inactivity. Remove these two lines on a network where UDP works.
+REM Sau HTTP proxy, UDP thuong bi chan -> ep di DERP (TCP) + giu tunnel song.
 set "TS_DEBUG_ALWAYS_USE_DERP=1"
 set "TS_DERP_KEEPALIVE_SECS=25"
 if not exist "%~dp0state" mkdir "%~dp0state"
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 
 echo ============================================================
-echo  Tailscale Portable (userspace-networking mode)
-echo   State dir  : %~dp0state
-echo   Proxy conf : %TS_PROXY_CONF%
-echo   Logs dir   : %TS_LOGS_DIR%
+echo  Tailscale Portable (userspace) - self-host
+echo   Server     : %HS_SERVER%
+echo   SOCKS5     : %SOCKS_ADDR%
+echo   LAN proxy  : %LAN_PROXY_MODE%
 echo ============================================================
 echo.
-echo Starting tailscaled in a separate window...
-REM userspace-networking needs no TUN driver, so this works without wintun.dll.
-start "tailscaled - Tailscale Portable" /D "%~dp0" tailscaled.exe --tun=userspace-networking --statedir="%~dp0state" --verbose=1
+echo Starting tailscaled...
+REM userspace-networking: khong can wintun/driver. Bat SOCKS5 de app/LAN-proxy dung.
+start "tailscaled - Tailscale Portable" /D "%~dp0" tailscaled.exe --tun=userspace-networking --socks5-server=%SOCKS_ADDR% --statedir="%~dp0state" --verbose=1
 
-echo Waiting for the daemon to come up...
+echo Waiting for the daemon...
+if defined HS_AUTHKEY ( set "AUTHARG=--authkey=%HS_AUTHKEY%" ) else ( set "AUTHARG=" )
 set /a n=0
 :trylogin
 timeout /t 2 /nobreak >nul
-REM --unattended (ForceDaemon) keeps Tailscale connected after this CLI client
-REM exits; without it, tailscaled disconnects when no client is attached.
-tailscale.exe up --unattended
+REM --login-server tro ve headscale tu host; --unattended giu ket noi sau khi CLI thoat.
+tailscale.exe up --unattended --login-server=%HS_SERVER% %AUTHARG% --accept-routes
 if %errorlevel% equ 0 goto loggedin
 set /a n+=1
 if %n% lss 10 goto trylogin
 echo.
-echo [!] Could not reach tailscaled after several tries.
-echo     Look at the "tailscaled" window for the error message.
+echo [!] Khong ket noi duoc tailscaled / dang nhap. Xem cua so "tailscaled".
 goto done
 
 :loggedin
 echo.
-echo Connected. Current status:
+echo Connected. Status:
 tailscale.exe status
+
+REM ============ LAN-proxy (gop vao day - KHOI chay script thu 2) ============
+if /I "%LAN_PROXY_MODE%"=="itop" (
+    echo.
+    echo [LAN/itop] Chia se mang noi bo qua tailnet ...
+    start "gost-itop" /D "%~dp0" gost.exe -L "http://127.0.0.1:%PROXY_PORT%"
+    tailscale.exe serve --bg --tcp %PROXY_PORT% tcp://127.0.0.1:%PROXY_PORT%
+    echo [LAN/itop] serve status (phai thay TCP %PROXY_PORT%):
+    tailscale.exe serve status
+)
+if /I "%LAN_PROXY_MODE%"=="votam" (
+    echo.
+    echo [LAN/votam] Bac cau toi itop qua tailnet ...
+    start "gost-votam" /D "%~dp0" gost.exe -L "http://127.0.0.1:18888" -F "socks5://%SOCKS_ADDR%" -F "http://%ITOP_TS_IP%:%PROXY_PORT%"
+    echo [LAN/votam] Bat PAC cho trinh duyet:
+    echo     file:///%~dp0tailscale-proxy.pac
+)
 
 :done
 echo.
-echo Keep the "tailscaled" window open while using Tailscale.
-echo To stop, run stop-tailscale.bat (or close that window).
-echo.
-echo NOTE: portable runs in userspace mode (access the tailnet from this app).
-echo To route ALL of this PC's traffic, use the installer build instead.
+echo Giu cua so "tailscaled" mo trong khi dung. Dung: chay stop-tailscale.bat.
 echo.
 pause
