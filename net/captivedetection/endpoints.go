@@ -121,8 +121,10 @@ func availableEndpoints(derpMap *tailcfg.DERPMap, preferredDERPRegionID int, log
 		}
 		endpoints = append(endpoints, Endpoint{u, http.StatusNoContent, "", false, Tailscale})
 	}
-	appendTailscaleEndpoint("http://controlplane.tailscale.com/generate_204")
-	appendTailscaleEndpoint("http://login.tailscale.com/generate_204")
+	// Self-host (fork): dùng domain riêng thay cho controlplane/login.tailscale.com
+	// để KHÔNG liên hệ hạ tầng Tailscale Inc. Server tự host trả 204 tại
+	// /generate_204 (xem Caddyfile của deployHeadscale).
+	appendTailscaleEndpoint("https://vpn2.hangocthanh.io.vn/generate_204")
 
 	// Sort the endpoints by provider so that we can prioritize DERP nodes in the preferred region, followed by
 	// any other DERP server elsewhere, then followed by Tailscale endpoints.
