@@ -278,7 +278,15 @@ jobs:
             # votam side bridge: the EXACT chain shape used in start-tailscale.bat.
             $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18888','-F','socks5://127.0.0.1:1055','-F','http://127.0.0.1:18080'
             Start-Sleep -Seconds 6
-            $code = (curl.exe -s -o NUL -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18888 http://127.0.0.1:9000)
+            # The 4-process chain can take a few seconds to be fully ready on a busy
+            # runner (a single fixed wait flakes with a transient 503). Retry until 200.
+            $code = "000"
+            for ($i = 0; $i -lt 12; $i++) {
+              $code = (curl.exe -s -o NUL -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18888 http://127.0.0.1:9000)
+              if ($code -eq "200") { break }
+              Write-Host "  attempt $i: HTTP $code (chain warming up) ..."
+              Start-Sleep -Seconds 3
+            }
             Write-Host "Chain (votam-gost -> socks5 -> itop-gost -> target): HTTP $code"
             if ($code -ne "200") { throw "FAIL: LAN-proxy gost chain broken (got '$code')" }
             Write-Host "PASS: full gost chain works end-to-end (this is the votam->itop proxy path)."
