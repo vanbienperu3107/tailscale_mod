@@ -284,7 +284,7 @@ jobs:
             for ($i = 0; $i -lt 12; $i++) {
               $code = (curl.exe -s -o NUL -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18888 http://127.0.0.1:9000)
               if ($code -eq "200") { break }
-              Write-Host "  attempt $i: HTTP $code (chain warming up) ..."
+              Write-Host "  attempt ${i}: HTTP $code (chain warming up) ..."
               Start-Sleep -Seconds 3
             }
             Write-Host "Chain (votam-gost -> socks5 -> itop-gost -> target): HTTP $code"
