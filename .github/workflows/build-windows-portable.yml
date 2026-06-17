@@ -114,7 +114,8 @@ jobs:
           # reach a remote node's LAN (e.g. 10.120.x.x) through another portable node.
           cp build/gost/gost.exe "dist/${portable}/"
           cp release/windows-portable/tailscale-proxy.pac \
-             release/windows-portable/LAN-PROXY-README.txt "dist/${portable}/"
+             release/windows-portable/LAN-PROXY-README.txt \
+             release/windows-portable/test-lan.bat "dist/${portable}/"
           ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
 
           # Installer (full VPN service - bundles wintun.dll)
