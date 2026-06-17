@@ -9,15 +9,15 @@ set "HS_SERVER=https://vpn2.hangocthanh.io.vn"
 REM (Tuy chon) pre-auth key. De TRONG = dang nhap bang Google (OIDC).
 set "HS_AUTHKEY="
 
-REM LAN-proxy (truy cap mang noi bo cua may KHAC, vd 10.x.x.x):
-REM   itop       = may o trong mang do, CHIA SE  (NATIVE: advertise-routes, KHONG gost)
-REM   votam      = may muon DUNG                 (NATIVE: accept-routes + SOCKS5, KHONG gost)
-REM   itop-gost  = du phong: chia se kieu cu bang gost + tailscale serve
-REM   votam-gost = du phong: dung kieu cu bang gost bridge
-REM   (de trong) = tat, chi chay VPN binh thuong
+REM LAN-proxy mode. DE TRONG = TU NHAN DIEN:
+REM   may co IP trong dai corp (ITOP_LAN_PREFIX) -> itop (CHIA SE)
+REM   nguoc lai                                  -> votam (DUNG)
+REM Co the dat tay: itop | votam | itop-gost | votam-gost
 set "LAN_PROXY_MODE="
 
-REM Dai IP noi bo se di qua tailnet (mac dinh ca 10.0.0.0/8).
+REM Dai IP corp de TU NHAN DIEN may itop (may co IP bat dau bang day nay -> itop).
+set "ITOP_LAN_PREFIX=10.121."
+REM Dai IP noi bo se di qua tailnet.
 set "LAN_ROUTES=10.0.0.0/8"
 
 REM SOCKS5 cuc bo (userspace + LAN-proxy). Trinh duyet votam tro vao day.
@@ -27,14 +27,37 @@ set "ITOP_TS_IP=100.64.0.1"
 set "PROXY_PORT=18080"
 REM ===============================================================
 
-REM Tailscale can quyen admin (tao named pipe). Tu nang quyen neu chua co.
+REM Tham so (tuy chon):
+REM   start-tailscale.bat <mode> [auto]   mode = itop|votam|itop-gost|votam-gost
+REM   start-tailscale.bat auto            tu nhan dien mode + chay nen (cho Task)
+set "AUTORUN="
+if /I not "%~1"=="auto" goto chk_mode
+set "AUTORUN=1"
+goto args_done
+:chk_mode
+if not "%~1"=="" set "LAN_PROXY_MODE=%~1"
+if /I "%~2"=="auto" set "AUTORUN=1"
+:args_done
+
+REM Tailscale can quyen admin (tao named pipe). Tu nang quyen, giu nguyen tham so.
 net session >nul 2>&1
 if not errorlevel 1 goto admin_ok
 echo Requesting administrator privileges...
+if "%~1"=="" goto elevate_plain
+powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
+exit /b
+:elevate_plain
 powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
 exit /b
 :admin_ok
 cd /d "%~dp0"
+
+REM ====== TU NHAN DIEN VAI TRO (chi khi LAN_PROXY_MODE con trong) ======
+REM May co IP bat dau bang %ITOP_LAN_PREFIX% -> itop ; nguoc lai -> votam.
+if not "%LAN_PROXY_MODE%"=="" goto after_detect
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$ips=(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue).IPAddress; if ($ips -like '%ITOP_LAN_PREFIX%*') {'itop'} else {'votam'}"`) do set "LAN_PROXY_MODE=%%I"
+echo [auto] Tu nhan dien vai tro: LAN_PROXY_MODE=%LAN_PROXY_MODE%
+:after_detect
 
 REM Portable: state + proxy.conf + logs nam canh binaries.
 set "TS_PROXY_CONF=%~dp0proxy.conf"
@@ -65,8 +88,8 @@ if defined HS_AUTHKEY (set "AUTHARG=--authkey=%HS_AUTHKEY%") else (set "AUTHARG=
 set /a n=0
 :trylogin
 timeout /t 2 /nobreak >nul
-REM --login-server tro ve headscale tu host; --unattended giu ket noi sau khi CLI thoat;
-REM --accept-routes de nhan route LAN do itop quang ba; %LANARG% = advertise (mode itop).
+REM --login-server -> headscale tu host; --unattended giu ket noi; --accept-routes
+REM de nhan route LAN do itop quang ba; %LANARG% = advertise (chi mode itop).
 tailscale.exe up --unattended --login-server=%HS_SERVER% %AUTHARG% --accept-routes %LANARG%
 if %errorlevel% equ 0 goto loggedin
 set /a n+=1
@@ -90,7 +113,7 @@ goto done
 :lan_itop
 echo.
 echo [LAN/itop - NATIVE] Da quang ba route %LAN_ROUTES% vao tailnet.
-echo   Server tu duyet (auto-approve). May votam (MODE=votam) se di qua itop nay.
+echo   Server tu duyet (auto-approve). May votam se di qua itop nay.
 echo   KHONG can gost, KHONG can tailscale serve.
 goto done
 
@@ -121,7 +144,9 @@ echo     file:///%~dp0tailscale-proxy.pac
 goto done
 
 :done
+if defined AUTORUN goto finish
 echo.
 echo Giu cua so "tailscaled" mo trong khi dung. Dung: chay stop-tailscale.bat.
 echo.
 pause
+:finish

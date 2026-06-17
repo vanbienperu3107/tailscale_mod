@@ -115,7 +115,11 @@ jobs:
           cp build/gost/gost.exe "dist/${portable}/"
           cp release/windows-portable/tailscale-proxy.pac \
              release/windows-portable/LAN-PROXY-README.txt \
-             release/windows-portable/test-lan.bat "dist/${portable}/"
+             release/windows-portable/test-lan.bat \
+             release/windows-portable/start-itop.bat \
+             release/windows-portable/start-votam.bat \
+             release/windows-portable/install-autostart.bat \
+             release/windows-portable/uninstall-autostart.bat "dist/${portable}/"
           ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
 
           # Installer (full VPN service - bundles wintun.dll)
@@ -234,9 +238,13 @@ jobs:
           # 1) Files present in the portable package
           $gost = Join-Path $dir "gost.exe"
           if (-not (Test-Path $gost)) { throw "FAIL: gost.exe not bundled in portable zip" }
-          foreach ($f in @("tailscale-proxy.pac","LAN-PROXY-README.txt")) {
+          foreach ($f in @("tailscale-proxy.pac","LAN-PROXY-README.txt","start-itop.bat","start-votam.bat","install-autostart.bat","uninstall-autostart.bat")) {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "FAIL: LAN-proxy file missing: $f" }
           }
+          # Native subnet routing + auto-detect must be present in start-tailscale.bat
+          $sb = Get-Content (Join-Path $dir "start-tailscale.bat") -Raw
+          if ($sb -notmatch "advertise-routes") { throw "FAIL: start-tailscale.bat missing native advertise-routes" }
+          if ($sb -notmatch "ITOP_LAN_PREFIX") { throw "FAIL: start-tailscale.bat missing auto-detect (ITOP_LAN_PREFIX)" }
           # Regression guard: start-tailscale.bat MUST target the self-host headscale,
           # never Tailscale Inc's default control plane.
           $startbat = Get-Content (Join-Path $dir "start-tailscale.bat") -Raw

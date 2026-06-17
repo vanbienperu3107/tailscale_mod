@@ -3,6 +3,16 @@
  (ca 2 may deu chay ban PORTABLE userspace - khong cai gi)
 ========================================================================
 
+**** NHANH NHAT (tu dong) ****
+  1. Double-click start-tailscale.bat -> no TU NHAN DIEN vai tro:
+       - May co IP 10.121.x.x (trong mang corp) -> tu bat itop (CHIA SE)
+       - May khac                                -> tu bat votam (DUNG)
+  2. (Tuy chon) Double-click install-autostart.bat 1 lan -> Tailscale TU CHAY
+     moi khi dang nhap Windows, KHONG hoi UAC. Go: uninstall-autostart.bat.
+  3. Tren may votam, bat PAC tailscale-proxy.pac cho trinh duyet (hoac SOCKS5
+     127.0.0.1:1055). Xong.
+  Muon ep vai tro thay vi tu nhan dien: dung start-itop.bat / start-votam.bat.
+
 CO 2 CACH. MAC DINH dung CACH 1 (native) - gon, KHONG can gost.
 
 ------------------------------------------------------------------------
