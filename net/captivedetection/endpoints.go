@@ -111,20 +111,10 @@ func availableEndpoints(derpMap *tailcfg.DERPMap, preferredDERPRegionID int, log
 		}
 	}
 
-	// Let's also try the default Tailscale coordination server and admin console.
-	// These are likely to be blocked on some networks.
-	appendTailscaleEndpoint := func(urlString string) {
-		u, err := url.Parse(urlString)
-		if err != nil {
-			logf("captivedetection: failed to parse Tailscale URL %q: %v", urlString, err)
-			return
-		}
-		endpoints = append(endpoints, Endpoint{u, http.StatusNoContent, "", false, Tailscale})
-	}
-	// Self-host (fork): dùng domain riêng thay cho controlplane/login.tailscale.com
-	// để KHÔNG liên hệ hạ tầng Tailscale Inc. Server tự host trả 204 tại
-	// /generate_204 (xem Caddyfile của deployHeadscale).
-	appendTailscaleEndpoint("https://vpn2.hangocthanh.io.vn/generate_204")
+	// Self-host (fork): KHÔNG thêm endpoint hardcode (đã bỏ controlplane/
+	// login.tailscale.com). Captive-detection chỉ dùng các endpoint suy ra từ
+	// DERP map do control server (headscale) cấp ở trên → tự động theo server
+	// của bạn, không hardcode domain trong binary, không liên hệ Tailscale Inc.
 
 	// Sort the endpoints by provider so that we can prioritize DERP nodes in the preferred region, followed by
 	// any other DERP server elsewhere, then followed by Tailscale endpoints.
