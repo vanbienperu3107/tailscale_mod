@@ -286,46 +286,24 @@ jobs:
             foreach ($x in $procs) { if ($x -and -not $x.HasExited) { Stop-Process -Id $x.Id -Force -ErrorAction SilentlyContinue } }
           }
 
-      - name: Real 'tailscale serve' against headscale (ephemeral node)
+      - name: Verify 'tailscale serve --tcp' syntax exists in this build
         shell: pwsh
-        env:
-          HS_TEST_AUTHKEY: ${{ secrets.HS_TEST_AUTHKEY }}
         run: |
           $ErrorActionPreference = "Stop"
-          if (-not $env:HS_TEST_AUTHKEY) { Write-Host "No HS_TEST_AUTHKEY secret -> skipping real serve test."; exit 0 }
+          # NOTE: a full ephemeral-node serve test was removed on purpose - registering
+          # + deleting ephemeral nodes churned headscale and tripped a NodeStore
+          # map-generation bug ("node not found") affecting the whole tailnet. Here we
+          # only validate that the serve subcommand + --tcp flag exist (the exact syntax
+          # start-tailscale.bat uses). serve itself is known-supported (on the real
+          # machine it returned a user-ACL 401, i.e. the command + LocalAPI handled it).
           $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
           Expand-Archive -Path $zip.FullName -DestinationPath serveapp -Force
           $dir = (Get-ChildItem serveapp -Directory | Select-Object -First 1).FullName
-          $tailscaled = Join-Path $dir "tailscaled.exe"
-          $tailscale  = Join-Path $dir "tailscale.exe"
-          $state = Join-Path $dir "state2"; New-Item -ItemType Directory -Force $state | Out-Null
-          $tsd = Start-Process $tailscaled -PassThru -WindowStyle Hidden -ArgumentList "--tun=userspace-networking","--socks5-server=127.0.0.1:1057","--statedir=$state"
-          try {
-            # Wait for the daemon LocalAPI to actually be reachable first.
-            for ($i=0; $i -lt 30; $i++) { Start-Sleep 1; $r=(& $tailscale status 2>&1 | Out-String); if ($r -notmatch "failed to connect|cannot find the file") { break } }
-            Write-Host "Daemon ready. Registering ephemeral node to headscale..."
-            (& $tailscale up --login-server=https://vpn2.hangocthanh.io.vn --authkey=$env:HS_TEST_AUTHKEY --hostname=ci-serve-test --timeout=90s 2>&1 | Out-String) | Write-Host
-            # Poll until the node is REGISTERED (got a 100.64.x tailnet IP) before testing serve.
-            $ok=$false
-            for ($i=0; $i -lt 45; $i++) {
-              Start-Sleep 2
-              $st=(& $tailscale status 2>&1 | Out-String)
-              if ($st -match "100\.64\.") { $ok=$true; Write-Host "Registered:`n$st"; break }
-            }
-            if (-not $ok) { Write-Host "Last status:`n$((& $tailscale status 2>&1 | Out-String))"; throw "FAIL: node never registered to headscale (control-plane reachability from runner?)" }
-            Write-Host "Running the exact serve command from start-tailscale.bat..."
-            (& $tailscale serve --bg --tcp 18080 tcp://127.0.0.1:18080 2>&1 | Out-String) | Write-Host
-            Start-Sleep -Seconds 2
-            $s = (& $tailscale serve status 2>&1 | Out-String)
-            Write-Host "serve status:`n$s"
-            if ($s -notmatch "18080") { throw "FAIL: tailscale serve did NOT expose port 18080 (serve+userspace may be unsupported)" }
-            Write-Host "PASS: 'tailscale serve --tcp 18080' works with this build on headscale (userspace mode)."
-          }
-          finally {
-            try { & $tailscale serve reset 2>&1 | Out-Null } catch {}
-            try { & $tailscale logout 2>&1 | Out-Null } catch {}
-            if ($tsd -and -not $tsd.HasExited) { Stop-Process -Id $tsd.Id -Force -ErrorAction SilentlyContinue }
-          }
+          $tailscale = Join-Path $dir "tailscale.exe"
+          $help = (& $tailscale serve --help 2>&1 | Out-String)
+          Write-Host $help
+          if ($help -notmatch "--tcp") { throw "FAIL: 'tailscale serve --tcp' not available in this build (start-tailscale.bat syntax would be wrong)" }
+          Write-Host "PASS: 'tailscale serve' subcommand + --tcp flag present in this build."
 
   release:
     name: Publish versioned release
