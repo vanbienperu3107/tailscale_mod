@@ -333,7 +333,7 @@ jobs:
 
           Assets:
           - **installer** zip - registers the `tailscaled` Windows service (full VPN, bundles `wintun.dll`) and installs a default `proxy.conf` to `C:\ProgramData\Tailscale`.
-          - **portable** zip - unzip and run in userspace mode, no install needed; `proxy.conf` lives next to the binaries. Also bundles `gost.exe` + LAN-proxy helper scripts (`itop-share-proxy.bat`, `votam-use-proxy.bat`, `tailscale-proxy.pac`) to reach a remote node's LAN (e.g. 10.120.x.x) without installing anything - see `LAN-PROXY-README.txt`.
+          - **portable** zip - unzip and run in userspace mode, no install needed; `proxy.conf` lives next to the binaries. Also bundles `gost.exe` + LAN-proxy helpers (set `LAN_PROXY_MODE` in `start-tailscale.bat`, plus `test-lan.bat` + `tailscale-proxy.pac`) to reach a remote node's LAN (e.g. 10.x.x.x) without installing anything - see `LAN-PROXY-README.txt`.
 
           `proxy.conf` ships disabled by default (behaves like stock Tailscale until you edit it).
           EOF

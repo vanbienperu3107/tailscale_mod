@@ -1,5 +1,6 @@
 # Windows scripts/text must ship with CRLF line endings inside the zip,
 # even when the release is assembled on a Linux CI runner.
 *.bat       text eol=crlf
-README.txt  text eol=crlf
+*.txt       text eol=crlf
+*.pac       text eol=crlf
 proxy.conf  text eol=lf
