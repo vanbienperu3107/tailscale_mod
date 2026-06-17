@@ -301,15 +301,24 @@ jobs:
           $state = Join-Path $dir "state2"; New-Item -ItemType Directory -Force $state | Out-Null
           $tsd = Start-Process $tailscaled -PassThru -WindowStyle Hidden -ArgumentList "--tun=userspace-networking","--socks5-server=127.0.0.1:1057","--statedir=$state"
           try {
-            Start-Sleep -Seconds 4
-            Write-Host "Registering ephemeral node to headscale..."
-            (& $tailscale up --login-server=https://vpn2.hangocthanh.io.vn --authkey=$env:HS_TEST_AUTHKEY --hostname=ci-serve-test --accept-routes --timeout=90s 2>&1 | Out-String) | Write-Host
-            (& $tailscale status 2>&1 | Out-String) | Write-Host
+            # Wait for the daemon LocalAPI to actually be reachable first.
+            for ($i=0; $i -lt 30; $i++) { Start-Sleep 1; $r=(& $tailscale status 2>&1 | Out-String); if ($r -notmatch "failed to connect|cannot find the file") { break } }
+            Write-Host "Daemon ready. Registering ephemeral node to headscale..."
+            (& $tailscale up --login-server=https://vpn2.hangocthanh.io.vn --authkey=$env:HS_TEST_AUTHKEY --hostname=ci-serve-test --timeout=90s 2>&1 | Out-String) | Write-Host
+            # Poll until the node is REGISTERED (got a 100.64.x tailnet IP) before testing serve.
+            $ok=$false
+            for ($i=0; $i -lt 45; $i++) {
+              Start-Sleep 2
+              $st=(& $tailscale status 2>&1 | Out-String)
+              if ($st -match "100\.64\.") { $ok=$true; Write-Host "Registered:`n$st"; break }
+            }
+            if (-not $ok) { Write-Host "Last status:`n$((& $tailscale status 2>&1 | Out-String))"; throw "FAIL: node never registered to headscale (control-plane reachability from runner?)" }
             Write-Host "Running the exact serve command from start-tailscale.bat..."
             (& $tailscale serve --bg --tcp 18080 tcp://127.0.0.1:18080 2>&1 | Out-String) | Write-Host
+            Start-Sleep -Seconds 2
             $s = (& $tailscale serve status 2>&1 | Out-String)
             Write-Host "serve status:`n$s"
-            if ($s -notmatch "18080") { throw "FAIL: tailscale serve did NOT expose port 18080 (serve+userspace may be unsupported on this build)" }
+            if ($s -notmatch "18080") { throw "FAIL: tailscale serve did NOT expose port 18080 (serve+userspace may be unsupported)" }
             Write-Host "PASS: 'tailscale serve --tcp 18080' works with this build on headscale (userspace mode)."
           }
           finally {
