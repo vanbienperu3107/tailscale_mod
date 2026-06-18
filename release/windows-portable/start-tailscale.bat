@@ -79,9 +79,13 @@ echo   SOCKS5     : %SOCKS_ADDR%
 echo   LAN proxy  : %LAN_PROXY_MODE%
 echo ============================================================
 echo.
-echo Starting tailscaled...
+echo Starting tailscaled (chay AN/hidden - dong cua so KHONG lam chet daemon)...
+REM Chi giu 1 instance: kill cai cu (neu co) roi chay lai sach.
+taskkill /IM tailscaled.exe /F >nul 2>&1
 REM userspace-networking: khong can wintun/driver. Bat SOCKS5 de app/LAN-proxy dung.
-start "tailscaled - Tailscale Portable" /D "%~dp0" tailscaled.exe --tun=userspace-networking --socks5-server=%SOCKS_ADDR% --statedir="%~dp0state" --verbose=1
+REM Chay HIDDEN + detached: khong co cua so de dong nham; log ghi vao thu muc logs\.
+REM Muon dung han: chay stop-tailscale.bat.
+powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -WorkingDirectory '%~dp0' -FilePath '%~dp0tailscaled.exe' -ArgumentList '--tun=userspace-networking','--socks5-server=%SOCKS_ADDR%','--statedir=%~dp0state','--verbose=1'"
 
 echo Waiting for the daemon...
 if defined HS_AUTHKEY (set "AUTHARG=--authkey=%HS_AUTHKEY%") else (set "AUTHARG=")
