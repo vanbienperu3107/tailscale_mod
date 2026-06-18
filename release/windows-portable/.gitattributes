@@ -4,4 +4,6 @@
 *.txt       text eol=crlf
 *.pac       text eol=crlf
 *.vbs       text eol=crlf
+*.ps1       text eol=crlf
+*.example   text eol=crlf
 proxy.conf  text eol=lf

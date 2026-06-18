@@ -107,6 +107,14 @@ echo.
 echo Connected. Status:
 tailscale.exe status
 
+REM ===== Reporter MAC + latency (chi khi da cau hinh metrics.conf) =====
+REM Chay AN + tach tien trinh; mutex trong .ps1 dam bao 1 ban duy nhat.
+REM Khong co metrics.conf (chua dien token) -> bo qua, khong gui gi.
+if exist "%~dp0metrics.conf" (
+  echo Bat reporter MAC/latency ^(an^)...
+  powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','%~dp0metrics-report.ps1'"
+)
+
 REM ============ LAN-proxy (gop vao day - KHOI chay script thu 2) ============
 if /I "%LAN_PROXY_MODE%"=="itop"       goto lan_itop
 if /I "%LAN_PROXY_MODE%"=="votam"      goto lan_votam
