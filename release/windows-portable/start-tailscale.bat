@@ -107,10 +107,11 @@ echo.
 echo Connected. Status:
 tailscale.exe status
 
-REM ===== Reporter MAC + latency (chi khi da cau hinh metrics.conf) =====
-REM Chay AN + tach tien trinh; mutex trong .ps1 dam bao 1 ban duy nhat.
-REM Khong co metrics.conf (chua dien token) -> bo qua, khong gui gi.
-if exist "%~dp0metrics.conf" (
+REM ===== Reporter MAC + latency (ZERO-CONFIG, chay AN + tach tien trinh) =====
+REM Tu tim peer 'collector' trong tailnet roi gui (khong token, khong cau hinh).
+REM Mutex trong .ps1 dam bao 1 ban. Khong thay collector -> tu cho, khong loi.
+REM Tat: xoa metrics-report.ps1.
+if exist "%~dp0metrics-report.ps1" (
   echo Bat reporter MAC/latency ^(an^)...
   powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','%~dp0metrics-report.ps1'"
 )

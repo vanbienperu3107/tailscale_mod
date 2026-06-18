@@ -1,21 +1,30 @@
-# metrics-report.ps1 - Reporter MAC + latency cho node Tailscale.
+# metrics-report.ps1 - Reporter MAC + latency cho node Tailscale (ZERO-CONFIG).
 #
-# Moi INTERVAL giay: doc MAC card chinh + `tailscale ping` cac peer (RTT, di
-# thang/DERP) roi POST ve VPS /metrics/report (xac thuc Bearer token).
+# Khong can token, khong can file cau hinh. Moi INTERVAL giay:
+#   - doc MAC card chinh
+#   - `tailscale ping` TAT CA peer (cac node khac + server) -> RTT, di thang/DERP
+#   - tu tim peer ten 'collector' (VPS trong tailnet) roi POST ket qua THANG toi
+#     http://<ip-tailnet-collector>:8090/metrics/report  (trong tailnet, khong token)
 #
-# Token doc tu metrics.conf (canh file nay). KHONG co token -> thoat ngay
-# (khong gui gi). Token PHAI khop METRICS_TOKEN tren server.
+# Node userspace (ban portable, vd itop): POST di qua SOCKS 127.0.0.1:7654.
+# Node TUN (ban cai day du): POST di thang. Tu phat hien.
 #
-# Chay 1 ban duy nhat (mutex). Duoc start-tailscale.bat goi an khi co metrics.conf;
-# may ban cai day du (votam) co the chay tay: powershell -File metrics-report.ps1
-#
-# Tu kiem tra logic parse:  powershell -File metrics-report.ps1 -SelfTest
+# Chay 1 ban duy nhat (mutex). Duoc start-tailscale.bat goi an. May cai day du
+# co the chay tay:  powershell -File metrics-report.ps1
+# Tu kiem tra parser:  powershell -File metrics-report.ps1 -SelfTest
 param([switch]$SelfTest)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
 
 $base = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# Cau hinh mac dinh (zero-config). Doi o day neu can.
+$CollectorHost = 'collector'      # ten node VPS trong tailnet
+$CollectorPort = 8090
+$Interval      = 60
+$PingCount     = 2
+$SocksAddr     = '127.0.0.1:7654' # SOCKS cua ban portable (userspace)
 
 function Parse-Ping([string]$out) {
     # Tra ve hashtable { ok; rtt; path }. path = 'direct' hoac 'derp:<region>'.
@@ -29,7 +38,6 @@ function Parse-Ping([string]$out) {
 }
 
 function Get-PrimaryMac {
-    # MAC card co default route (NIC chinh). Fallback: NIC vat ly dau tien Up.
     try {
         $idx = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
             Sort-Object RouteMetric | Select-Object -First 1).InterfaceIndex
@@ -58,54 +66,57 @@ if ($SelfTest) {
 $mutex = New-Object System.Threading.Mutex($false, 'Global\TailscaleMetricsReporter')
 if (-not $mutex.WaitOne(0)) { exit 0 }
 
-# --- doc config metrics.conf (key=value) ---
-$conf = Join-Path $base 'metrics.conf'
-if (-not (Test-Path $conf)) { exit 0 }
-$cfg = @{}
-foreach ($line in Get-Content $conf) {
-    $t = $line.Trim()
-    if ($t -eq '' -or $t.StartsWith('#')) { continue }
-    $i = $t.IndexOf('=')
-    if ($i -lt 1) { continue }
-    $cfg[$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
-}
-$token = $cfg['TOKEN']
-if ([string]::IsNullOrWhiteSpace($token)) { exit 0 }
-$server = if ($cfg['SERVER']) { $cfg['SERVER'].TrimEnd('/') } else { 'https://vpn2.hangocthanh.io.vn' }
-$interval = 60; if ($cfg['INTERVAL'] -match '^\d+$') { $interval = [int]$cfg['INTERVAL'] }
-$count = 2; if ($cfg['PINGCOUNT'] -match '^\d+$') { $count = [int]$cfg['PINGCOUNT'] }
-
-# tailscale.exe: uu tien canh script (ban portable), neu khong co thi dung PATH (ban cai day du)
+# tailscale.exe: uu tien canh script (ban portable), neu khong co thi PATH (ban cai day du)
 $ts = Join-Path $base 'tailscale.exe'
 if (-not (Test-Path $ts)) { $ts = 'tailscale.exe' }
 
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Node userspace (khong co card TUN 'Tailscale') -> POST phai qua SOCKS.
+$hasTun = [bool](Get-NetAdapter -ErrorAction SilentlyContinue |
+    Where-Object { $_.InterfaceDescription -match 'Tailscale' -or $_.Name -match 'Tailscale' })
+$useSocks = -not $hasTun
+
+function Send-Report([string]$collectorIp, [string]$body) {
+    $tmp = Join-Path $env:TEMP ("tsmetrics_{0}.json" -f $PID)
+    [System.IO.File]::WriteAllText($tmp, $body, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        $a = @('-s', '-m', '20', '-X', 'POST', "http://${collectorIp}:${CollectorPort}/metrics/report",
+            '-H', 'Content-Type: application/json', '--data-binary', "@$tmp")
+        if ($useSocks) { $a = @('--socks5-hostname', $SocksAddr) + $a }
+        & curl.exe @a | Out-Null
+    } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
 
 while ($true) {
     try {
         $st = (& $ts status --json 2>$null | Out-String | ConvertFrom-Json)
-        if ($st -and $st.Self) {
-            $selfHost = $st.Self.HostName
-            $selfIp = ($st.Self.TailscaleIPs | Where-Object { $_ -notmatch ':' } | Select-Object -First 1)
-            $mac = Get-PrimaryMac
-            $samples = @()
-            if ($st.Peer) {
+        if ($st -and $st.Self -and $st.Peer) {
+            # tim peer 'collector' (VPS trong tailnet)
+            $collectorIp = $null
+            foreach ($p in $st.Peer.PSObject.Properties.Value) {
+                if ($p.HostName -eq $CollectorHost) {
+                    $collectorIp = ($p.TailscaleIPs | Where-Object { $_ -notmatch ':' } | Select-Object -First 1)
+                    break
+                }
+            }
+            if ($collectorIp) {
+                $selfHost = $st.Self.HostName
+                $selfIp = ($st.Self.TailscaleIPs | Where-Object { $_ -notmatch ':' } | Select-Object -First 1)
+                $mac = Get-PrimaryMac
+                $samples = @()
                 foreach ($p in $st.Peer.PSObject.Properties.Value) {
                     $dstIp = ($p.TailscaleIPs | Where-Object { $_ -notmatch ':' } | Select-Object -First 1)
                     if (-not $dstIp) { continue }
-                    $r = Parse-Ping ((& $ts ping -c $count --timeout 3s $dstIp 2>$null) | Out-String)
+                    $r = Parse-Ping ((& $ts ping -c $PingCount --timeout 3s $dstIp 2>$null) | Out-String)
                     $samples += [pscustomobject]@{
                         dst = $p.HostName; dst_ip = $dstIp
                         rtt_ms = $r.rtt; path = $r.path; ok = $r.ok
                     }
                 }
+                $body = @{ hostname = $selfHost; ipv4 = $selfIp; mac = $mac; samples = @($samples) } |
+                    ConvertTo-Json -Depth 6
+                Send-Report $collectorIp $body
             }
-            $payload = @{ hostname = $selfHost; ipv4 = $selfIp; mac = $mac; samples = @($samples) }
-            $body = $payload | ConvertTo-Json -Depth 6
-            Invoke-RestMethod -Uri "$server/metrics/report" -Method Post -TimeoutSec 20 `
-                -Headers @{ Authorization = "Bearer $token" } `
-                -ContentType 'application/json' -Body $body | Out-Null
         }
     } catch {}
-    Start-Sleep -Seconds $interval
+    Start-Sleep -Seconds $Interval
 }
