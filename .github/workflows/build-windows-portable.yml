@@ -119,7 +119,8 @@ jobs:
              release/windows-portable/start-itop.bat \
              release/windows-portable/start-votam.bat \
              release/windows-portable/install-autostart.bat \
-             release/windows-portable/uninstall-autostart.bat "dist/${portable}/"
+             release/windows-portable/uninstall-autostart.bat \
+             release/windows-portable/run-hidden.vbs "dist/${portable}/"
           ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
 
           # Installer (full VPN service - bundles wintun.dll)
@@ -238,9 +239,14 @@ jobs:
           # 1) Files present in the portable package
           $gost = Join-Path $dir "gost.exe"
           if (-not (Test-Path $gost)) { throw "FAIL: gost.exe not bundled in portable zip" }
-          foreach ($f in @("tailscale-proxy.pac","LAN-PROXY-README.txt","start-itop.bat","start-votam.bat","install-autostart.bat","uninstall-autostart.bat")) {
+          foreach ($f in @("tailscale-proxy.pac","LAN-PROXY-README.txt","start-itop.bat","start-votam.bat","install-autostart.bat","uninstall-autostart.bat","run-hidden.vbs")) {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "FAIL: LAN-proxy file missing: $f" }
           }
+          # Autostart must launch silently via wscript+run-hidden.vbs (no console flash).
+          $ia = Get-Content (Join-Path $dir "install-autostart.bat") -Raw
+          if ($ia -notmatch "wscript") { throw "FAIL: install-autostart.bat not using wscript hidden launcher" }
+          $vbs = Get-Content (Join-Path $dir "run-hidden.vbs") -Raw
+          if ($vbs -notmatch "start-tailscale\.bat") { throw "FAIL: run-hidden.vbs does not launch start-tailscale.bat" }
           # Native subnet routing + auto-detect must be present in start-tailscale.bat
           $sb = Get-Content (Join-Path $dir "start-tailscale.bat") -Raw
           if ($sb -notmatch "advertise-routes") { throw "FAIL: start-tailscale.bat missing native advertise-routes" }

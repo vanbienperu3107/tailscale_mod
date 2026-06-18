@@ -3,12 +3,14 @@ setlocal EnableExtensions
 title Cai tu dong chay Tailscale Portable khi dang nhap Windows
 
 REM ============================================================
-REM  Tao Scheduled Task chay start-tailscale.bat luc DANG NHAP
-REM  Windows, quyen cao (KHONG hoi UAC) -> tu bat khi mo may.
-REM  Mode (itop/votam) TU NHAN DIEN theo IP may, khoi nhap.
+REM  Tao Scheduled Task chay Tailscale luc DANG NHAP Windows,
+REM  quyen cao (KHONG hoi UAC) -> tu bat khi mo may.
+REM  Chay AN HOAN TOAN qua wscript+run-hidden.vbs: KHONG cua so,
+REM  KHONG nhay den. Mode (itop/votam) TU NHAN DIEN theo IP may.
 REM
-REM  LAN DAU TIEN: nen chay start-tailscale.bat 1 lan de dang
-REM  nhap Google; cac lan sau tu ket noi lai (khong can trinh duyet).
+REM  LAN DAU TIEN: PHAI chay start-itop.bat (hoac start-tailscale.bat)
+REM  1 lan de THAY URL dang nhap Google; cac lan sau task tu ket noi
+REM  lai (khong can trinh duyet) -> dung "chi lan dau can login".
 REM ============================================================
 
 REM Can quyen admin de tao task /RL HIGHEST.
@@ -21,19 +23,27 @@ exit /b
 cd /d "%~dp0"
 
 set "TASKNAME=TailscalePortable"
-set "TARGET=%~dp0start-tailscale.bat"
+set "VBS=%~dp0run-hidden.vbs"
+
+if not exist "%VBS%" (
+  echo LOI: khong tim thay run-hidden.vbs canh file nay.
+  echo Hay giai nen DAY DU goi portable roi chay lai.
+  pause
+  exit /b 1
+)
 
 echo.
 echo Tao Scheduled Task "%TASKNAME%":
-echo   chay  : "%TARGET%" auto   (mode tu nhan dien)
+echo   chay  : wscript "%VBS%"   (chay AN start-tailscale.bat auto)
 echo   khi   : dang nhap Windows
 echo   quyen : cao nhat (khong hoi UAC)
+echo   hien  : KHONG cua so, KHONG nhay den
 echo.
-schtasks /Create /TN "%TASKNAME%" /TR "\"%TARGET%\" auto" /SC ONLOGON /RL HIGHEST /F
+schtasks /Create /TN "%TASKNAME%" /TR "wscript.exe \"%VBS%\"" /SC ONLOGON /RL HIGHEST /F
 if errorlevel 1 goto fail
 
 echo.
-echo XONG. Tu gio Tailscale tu chay moi khi ban dang nhap Windows (mode tu nhan dien).
+echo XONG. Tu gio Tailscale tu chay AN moi khi ban dang nhap Windows (mode tu nhan dien).
 echo Chay thu ngay bay gio...
 schtasks /Run /TN "%TASKNAME%" >nul 2>&1
 echo.
