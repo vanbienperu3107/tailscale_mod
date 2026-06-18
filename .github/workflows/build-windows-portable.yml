@@ -282,9 +282,9 @@ jobs:
             # itop side: HTTP proxy that reaches the target via the OS network.
             $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18080'
             # Stand-in for the tailnet hop: a SOCKS5 server (== tailscale --socks5-server).
-            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','socks5://127.0.0.1:1055'
+            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','socks5://127.0.0.1:7654'
             # votam side bridge: the EXACT chain shape used in start-tailscale.bat.
-            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18888','-F','socks5://127.0.0.1:1055','-F','http://127.0.0.1:18080'
+            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18888','-F','socks5://127.0.0.1:7654','-F','http://127.0.0.1:18080'
             Start-Sleep -Seconds 6
             # The 4-process chain can take a few seconds to be fully ready on a busy
             # runner (a single fixed wait flakes with a transient 503). Retry until 200.

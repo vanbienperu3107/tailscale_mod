@@ -10,7 +10,7 @@
   2. (Tuy chon) Double-click install-autostart.bat 1 lan -> Tailscale TU CHAY
      moi khi dang nhap Windows, KHONG hoi UAC. Go: uninstall-autostart.bat.
   3. Tren may votam, bat PAC tailscale-proxy.pac cho trinh duyet (hoac SOCKS5
-     127.0.0.1:1055). Xong.
+     127.0.0.1:7654). Xong.
   Muon ep vai tro thay vi tu nhan dien: dung start-itop.bat / start-votam.bat.
 
 CO 2 CACH. MAC DINH dung CACH 1 (native) - gon, KHONG can gost.
@@ -27,7 +27,7 @@ Tailscale). Khong can gost, khong can `tailscale serve`.
 
   Tren may MUON DUNG:                         set "LAN_PROXY_MODE=votam"
      -> tu chay: tailscale up ... --accept-routes  (da co san)
-     -> app/trinh duyet tro vao SOCKS5 127.0.0.1:1055; tailscale dinh
+     -> app/trinh duyet tro vao SOCKS5 127.0.0.1:7654; tailscale dinh
         tuyen 10.x QUA itop trong netstack.
 
   May binh thuong (chi VPN):                  set "LAN_PROXY_MODE="
@@ -37,10 +37,10 @@ BAT PROXY tren may DUNG (votam) - 1 trong 2:
        Windows: Settings > Network & Internet > Proxy > Use setup script =
          file:///C:/<duong-dan-thu-muc>/tailscale-proxy.pac
        (Chrome / Edge / Firefox deu hieu SOCKS5 trong PAC.)
-  b) Hoac dat SOCKS5 thang cho trinh duyet: host 127.0.0.1  port 1055
+  b) Hoac dat SOCKS5 thang cho trinh duyet: host 127.0.0.1  port 7654
 
 SO DO (native):
-  votam browser --(PAC: chi 10.x)--> SOCKS5 127.0.0.1:1055 (tailscale)
+  votam browser --(PAC: chi 10.x)--> SOCKS5 127.0.0.1:7654 (tailscale)
      --(subnet route da accept)--> itop --> 10.x.x.x
 
 KIEM TRA:
@@ -56,7 +56,7 @@ Van bundle san gost.exe + test-lan.bat. Dung khi can:
   Tren may CHIA SE:   set "LAN_PROXY_MODE=itop-gost"
      -> chay gost(:18080) + `tailscale serve --tcp 18080`.
   Tren may MUON DUNG: set "LAN_PROXY_MODE=votam-gost"
-     -> chay gost bridge 18888 -> SOCKS5 1055 -> itop:18080.
+     -> chay gost bridge 18888 -> SOCKS5 7654 -> itop:18080.
      -> trong tailscale-proxy.pac, doi dong proxy thanh:
           return "PROXY 127.0.0.1:18888";
 

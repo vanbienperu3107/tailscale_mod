@@ -24,7 +24,7 @@ echo   Folder : %~dp0
 echo ============================================================
 echo.
 echo [1/4] Khoi dong tailscaled ...
-start "tailscaled-test" /D "%~dp0" tailscaled.exe --tun=userspace-networking --socks5-server=127.0.0.1:1055 --statedir="%~dp0state" --verbose=1
+start "tailscaled-test" /D "%~dp0" tailscaled.exe --tun=userspace-networking --socks5-server=127.0.0.1:7654 --statedir="%~dp0state" --verbose=1
 timeout /t 6 /nobreak >nul
 
 echo [2/4] Dang nhap headscale [neu hien link thi dang nhap Google] ...
@@ -59,7 +59,7 @@ goto done
 
 :mode_votam
 echo [3/4] Khoi dong gost bridge 18888 qua socks5 toi itop %ITOP_TS_IP%:18080 ...
-start "gost-votam" /D "%~dp0" gost.exe -L "http://127.0.0.1:18888" -F "socks5://127.0.0.1:1055" -F "http://%ITOP_TS_IP%:18080"
+start "gost-votam" /D "%~dp0" gost.exe -L "http://127.0.0.1:18888" -F "socks5://127.0.0.1:7654" -F "http://%ITOP_TS_IP%:18080"
 timeout /t 3 /nobreak >nul
 echo [4/4] Thu truy cap site noi bo: %TARGET%
 curl.exe -x http://127.0.0.1:18888 -s -o NUL -w "HTTP_CODE=%%{http_code}" --max-time 25 "%TARGET%" > "%~dp0_curl.txt" 2>&1

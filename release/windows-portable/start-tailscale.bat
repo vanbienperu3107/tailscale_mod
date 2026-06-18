@@ -21,7 +21,7 @@ REM Dai IP noi bo se di qua tailnet.
 set "LAN_ROUTES=10.0.0.0/8"
 
 REM SOCKS5 cuc bo (userspace + LAN-proxy). Trinh duyet votam tro vao day.
-set "SOCKS_ADDR=127.0.0.1:1055"
+set "SOCKS_ADDR=127.0.0.1:7654"
 REM (chi cho cac mode -gost) IP tailnet + port cua may itop chia se:
 set "ITOP_TS_IP=100.64.0.1"
 set "PROXY_PORT=18080"
@@ -127,7 +127,7 @@ echo [LAN/votam - NATIVE] Da accept-routes. Truy cap %LAN_ROUTES% QUA itop bang 
 echo   Bat proxy cho trinh duyet (1 trong 2 cach):
 echo     - PAC (chi %LAN_ROUTES% di qua, con lai DIRECT):
 echo         file:///%~dp0tailscale-proxy.pac
-echo     - Hoac dat SOCKS5 thang: host 127.0.0.1  port 1055
+echo     - Hoac dat SOCKS5 thang: host 127.0.0.1  port 7654
 goto done
 
 :lan_itop_gost
