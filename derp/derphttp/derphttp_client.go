@@ -1137,6 +1137,22 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// ForceReconnect closes the underlying network connection without permanently
+// closing the client. The next RecvDetail call will reconnect automatically.
+// This is called by the fast health checker when a dead DERP connection is detected.
+func (c *Client) ForceReconnect() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	if c.netConn != nil {
+		c.netConn.Close()
+		c.netConn = nil
+	}
+	c.client = nil
+}
+
 // closeForReconnect closes the underlying network connection and
 // zeros out the client field so future calls to Connect will
 // reconnect.

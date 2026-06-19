@@ -369,6 +369,10 @@ type Conn struct {
 	activeDerp         map[int]activeDerp                  // DERP regionID -> connection to a node in that region
 	prevDerp           map[int]*syncs.WaitGroupChan
 
+	// derpPingLatency stores the most recent measured round-trip time to each
+	// active DERP region, updated every derpFastPingInterval by runDerpFastPing.
+	derpPingLatency syncs.Map[int, time.Duration]
+
 	// derpRoute contains optional alternate routes to use as an
 	// optimization instead of contacting a peer via their home
 	// DERP connection.  If they sent us a message on a different
@@ -1103,6 +1107,17 @@ func (c *Conn) SetNetInfoCallback(fn func(*tailcfg.NetInfo)) {
 	if last != nil {
 		fn(last)
 	}
+}
+
+// DERPPingLatency returns a snapshot of the most recent measured round-trip
+// time to each active DERP region. The map is keyed by DERP region ID.
+// Values are updated every derpFastPingInterval by runDerpFastPing.
+func (c *Conn) DERPPingLatency() map[int]time.Duration {
+	result := make(map[int]time.Duration)
+	for regionID, rtt := range c.derpPingLatency.All() {
+		result[regionID] = rtt
+	}
+	return result
 }
 
 // LastRecvActivityOfNodeKey describes the time we last got traffic from

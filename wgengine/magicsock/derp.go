@@ -462,6 +462,7 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan de
 
 	go c.runDerpReader(ctx, regionID, dc, wg, startGate)
 	go c.runDerpWriter(ctx, dc, ch, wg, startGate)
+	go c.runDerpFastPing(ctx, regionID, dc, startGate)
 	if every := time.Duration(derpKeepAliveSecs()) * time.Second; every > 0 {
 		go c.runDerpKeepAlive(ctx, regionID, dc, every)
 	}
@@ -699,7 +700,7 @@ func (c *Conn) runDerpKeepAlive(ctx context.Context, regionID int, dc *derphttp.
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			err := dc.Ping(pingCtx)
 			cancel()
 			if err != nil {
@@ -707,6 +708,64 @@ func (c *Conn) runDerpKeepAlive(ctx context.Context, regionID int, dc *derphttp.
 				c.logf("magicsock: derp-%d keepalive ping failed: %v", regionID, err)
 				return
 			}
+		}
+	}
+}
+
+// runDerpFastPing pings the DERP connection every derpFastPingInterval,
+// measures round-trip latency, and forces a reconnect when no pong arrives
+// within derpFastPingTimeout. Dead nodes are detected within ~5 seconds.
+//
+// Measured RTT is stored in c.derpPingLatency[regionID] so callers can
+// query it via c.DERPPingLatency(). A goroutine running RecvDetail must be
+// active to handle pong responses; runDerpReader provides this.
+func (c *Conn) runDerpFastPing(ctx context.Context, regionID int, dc *derphttp.Client, startGate <-chan struct{}) {
+	select {
+	case <-startGate:
+	case <-ctx.Done():
+		return
+	}
+	defer c.derpPingLatency.Delete(regionID)
+
+	pingTicker := time.NewTicker(derpFastPingInterval)
+	defer pingTicker.Stop()
+	logTicker := time.NewTicker(30 * time.Second)
+	defer logTicker.Stop()
+
+	var lastRTT time.Duration
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-logTicker.C:
+			if lastRTT > 0 {
+				c.logf("magicsock: derp-%d latency: %v", regionID, lastRTT.Round(time.Millisecond))
+			}
+		case <-pingTicker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, derpFastPingTimeout)
+			t0 := time.Now()
+			err := dc.Ping(pingCtx)
+			rtt := time.Since(t0)
+			cancel()
+
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				c.logf("magicsock: derp-%d ping failed (%v), forcing reconnect", regionID, err)
+				dc.ForceReconnect()
+				// Wait one interval for runDerpReader to reconnect before trying again.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(derpFastPingInterval):
+				}
+				continue
+			}
+
+			lastRTT = rtt
+			c.derpPingLatency.Store(regionID, rtt)
+			c.logf("[v1] magicsock: derp-%d ping RTT=%v", regionID, rtt.Round(time.Millisecond))
 		}
 	}
 }
@@ -989,6 +1048,7 @@ func (c *Conn) closeDerpLocked(regionID int, why string) {
 		ad.cancel()
 		delete(c.activeDerp, regionID)
 		metricNumDERPConns.Set(int64(len(c.activeDerp)))
+		c.derpPingLatency.Delete(regionID)
 	}
 }
 
@@ -1107,4 +1167,12 @@ const (
 	// derpCleanStaleInterval is how often cleanStaleDerp runs when there
 	// are potentially-stale DERP connections to close.
 	derpCleanStaleInterval = 15 * time.Second
+
+	// derpFastPingInterval is how often the fast health checker pings each
+	// active DERP connection to detect dead nodes quickly.
+	derpFastPingInterval = 2 * time.Second
+
+	// derpFastPingTimeout is the maximum time to wait for a pong response
+	// before declaring the DERP node dead and forcing a reconnect.
+	derpFastPingTimeout = 3 * time.Second
 )

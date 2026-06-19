@@ -478,7 +478,7 @@ func (ServerRestartingMessage) msg() {}
 //
 // Once Recv returns an error, the Client is dead forever.
 func (c *Client) Recv() (m ReceivedMessage, err error) {
-	return c.recvTimeout(120 * time.Second)
+	return c.recvTimeout(10 * time.Second)
 }
 
 func (c *Client) recvTimeout(timeout time.Duration) (m ReceivedMessage, err error) {
