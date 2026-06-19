@@ -752,15 +752,20 @@ func (c *Conn) runDerpFastPing(ctx context.Context, regionID int, dc *derphttp.C
 				if ctx.Err() != nil {
 					return
 				}
-				c.logf("magicsock: derp-%d ping failed (%v), forcing reconnect", regionID, err)
-				dc.ForceReconnect()
-				// Wait one interval for runDerpReader to reconnect before trying again.
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(derpFastPingInterval):
-				}
-				continue
+				c.logf("magicsock: derp-%d ping failed (%v), closing region and reconnecting", regionID, err)
+				// Kick off a netcheck so maybeSetNearestDERP can pick a healthier
+				// region if one is available in the DERP map.
+				c.ReSTUN("derp-ping-fail")
+				// Close this region's activeDerp entirely and restart it.
+				// If ReSTUN updates c.myDerp to a different region,
+				// startDerpHomeConnectLocked will connect there instead.
+				// New goroutines (including a fresh runDerpFastPing) are spawned
+				// by the restart; this instance exits here.
+				c.mu.Lock()
+				c.closeOrReconnectDERPLocked(regionID, "fast-ping-fail")
+				c.logActiveDerpLocked()
+				c.mu.Unlock()
+				return
 			}
 
 			lastRTT = rtt
