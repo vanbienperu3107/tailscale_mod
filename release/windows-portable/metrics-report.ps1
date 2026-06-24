@@ -8,7 +8,7 @@
 # Cau hinh: sua cac bien $Dashboard* o dau file, hoac tao file 'metrics-config.ps1'
 # canh script de override (dot-sourced tu dong):
 #
-#   $DashboardUrl    = 'https://dashboard.hangocthanh.io.vn'
+#   $DashboardUrl    = 'https://vpn2.hangocthanh.io.vn/app'
 #   $MetricsSecret   = 'your-shared-secret'
 #
 # Chay thu:    powershell -File metrics-report.ps1 -SelfTest
@@ -22,7 +22,7 @@ $ProgressPreference    = 'SilentlyContinue'
 $base = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # ---- Cau hinh mac dinh -------------------------------------------------------
-$DashboardUrl  = 'https://dashboard.hangocthanh.io.vn'  # URL dashboard (khong co dau /)
+$DashboardUrl  = 'https://vpn2.hangocthanh.io.vn/app'    # URL dashboard (khong co dau /)
 $MetricsSecret = ''                                       # X-Metrics-Secret (de trong = khong kiem tra)
 $Interval      = 60                                       # giay giua cac lan bao cao
 $PingCount     = 2                                        # so lan ping moi peer
