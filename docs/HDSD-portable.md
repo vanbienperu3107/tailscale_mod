@@ -208,22 +208,38 @@ votam browser
 
 **Kiểm tra nhanh:** Chạy `test-lan.bat` trên cả hai máy.
 
-### Cách 2b: Vào trang chỉ itop mở được (tên miền nội bộ / chặn theo vùng)
+### Cách 2b: Vào trang chỉ itop mở được — HTTP proxy TÍCH HỢP (khuyên dùng)
 
 Ví dụ `bitel.com.pe`, `viettel.com.vn` — các trang này phải được **phân giải DNS
 và kết nối tại phía itop** (votam không resolve được / không vào trực tiếp được).
-Bắt buộc dùng chế độ gost (`itop-gost` + `votam-gost`): itop nhận nguyên tên miền,
-tự resolve bằng DNS mạng itop rồi mở kết nối.
 
-Hai tên miền trên đã có sẵn trong `tailscale-proxy.pac`. Thêm trang mới: mở
-`tailscale-proxy.pac`, thêm 1 dòng trong khối `DOMAIN`:
+Bản mod **tích hợp sẵn HTTP forward-proxy trong tailscaled** (không cần `gost.exe`,
+không cần `tailscale serve` → không vướng quyền user Windows). Cơ chế: biến môi
+trường `TS_PEER_HTTP_PROXY=<port>` làm tailscaled mở proxy ngay trên IP tailnet của
+node; peer khác trỏ trình duyệt/PAC tới `<ip-tailnet-itop>:<port>`, itop nhận nguyên
+tên miền, tự resolve bằng DNS mạng itop rồi mở kết nối.
+
+**Máy itop:** chạy `start-tailscale.bat itop` (mode `itop` tự đặt
+`TS_PEER_HTTP_PROXY=18080`). Lấy IP `100.x` của itop bằng `tailscale status`.
+> itop phải chạy ở chế độ userspace của bản portable (proxy phục vụ qua netstack).
+
+**Máy votam:** trỏ PAC tới `<ip-tailnet-itop>:18080`. Với votam **bản đầy đủ**
+(installer), tạo file PAC:
 
 ```js
-if (shExpMatch(host, "abc.com") || shExpMatch(host, "*.abc.com")) return ITOP;
+function FindProxyForURL(url, host) {
+    var ITOP = "PROXY 100.64.0.10:18080";   // đổi IP = IP 100.x của itop
+    if (shExpMatch(host, "bitel.com.pe")   || shExpMatch(host, "*.bitel.com.pe"))   return ITOP;
+    if (shExpMatch(host, "viettel.com.vn") || shExpMatch(host, "*.viettel.com.vn")) return ITOP;
+    return "DIRECT";
+}
 ```
 
-> ⚠️ Chế độ `itop-gost` dùng `tailscale serve --tcp`. Cần xác nhận `serve` hoạt
-> động với headscale vpn2 hiện tại bằng `test-lan.bat` trước khi dùng thật.
+Thêm trang mới = thêm 1 dòng `shExpMatch`. Kiểm tra từ votam:
+`curl -x http://<ip-itop>:18080 -I http://bitel.com.pe` → trả về `HTTP/...` là thông.
+
+> Cách 2 (gost + `tailscale serve`) ở trên chỉ còn là **dự phòng**; ưu tiên dùng
+> proxy tích hợp này vì không phụ thuộc `serve`/quyền Windows.
 
 ---
 

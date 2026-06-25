@@ -11,10 +11,17 @@ import (
 	"net"
 	"net/netip"
 
+	"tailscale.com/net/tsdial"
 	"tailscale.com/tsd"
 	"tailscale.com/types/logger"
 	"tailscale.com/wgengine/netstack"
 )
+
+// hookSetupPeerHTTPProxy, when non-nil, wires the integrated peer-facing HTTP
+// proxy onto the freshly created netstack Impl. It is set by peerproxy.go's
+// init when that file is compiled in (default builds); it stays nil when the
+// outbound-proxy or netstack features are omitted.
+var hookSetupPeerHTTPProxy func(logf logger.Logf, ns *netstack.Impl, dialer *tsdial.Dialer)
 
 func init() {
 	hookNewNetstack.Set(newNetstack)
@@ -42,6 +49,12 @@ func newNetstack(logf logger.Logf, sys *tsd.System, onlyNetstack bool) (tsd.Nets
 	ns.ProcessSubnets = onlyNetstack || handleSubnetsInNetstack()
 
 	dialer := sys.Dialer.Get() // must be set by caller already
+
+	// Integrated peer-facing HTTP proxy (TS_PEER_HTTP_PROXY). No-op unless the
+	// env knob is set; only effective in userspace-networking mode.
+	if hookSetupPeerHTTPProxy != nil {
+		hookSetupPeerHTTPProxy(logf, ns, dialer)
+	}
 
 	if onlyNetstack {
 		e := sys.Engine.Get()
