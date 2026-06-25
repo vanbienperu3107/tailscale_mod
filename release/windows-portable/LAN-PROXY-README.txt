@@ -65,18 +65,18 @@ Van bundle san gost.exe + test-lan.bat. Dung khi can:
   TAI itop.
 
   >> CACH MOI (KHUYEN DUNG) - HTTP proxy TICH HOP trong tailscaled:
-     - May itop: chay  start-tailscale.bat itop   (mode itop tu dat
-       TS_PEER_HTTP_PROXY=18080 -> tailscaled mo proxy tren IP tailnet cua no).
-       KHONG can gost.exe, KHONG can `tailscale serve` -> het loi quyen user.
-     - May votam: tro PAC toi  PROXY <ip-100.x-cua-itop>:18080
+     - May itop: chay  start-tailscale.bat itop   (start-tailscale.bat da dat san
+       TS_PEER_HTTP_PROXY=7655 VO DIEU KIEN -> tailscaled mo proxy tren IP tailnet
+       cua no, KHONG can sua tay). KHONG gost.exe, KHONG `tailscale serve`.
+     - May votam: tro PAC/proxy-switcher toi  PROXY <ip-100.x-cua-itop>:7655
        Vi du file PAC (votam ban day du):
          function FindProxyForURL(url, host) {
-           var ITOP = "PROXY 100.64.0.10:18080";   // doi = IP 100.x cua itop
+           var ITOP = "PROXY 100.64.0.11:7655";   // doi = IP 100.x cua itop
            if (shExpMatch(host,"bitel.com.pe")||shExpMatch(host,"*.bitel.com.pe")) return ITOP;
            if (shExpMatch(host,"viettel.com.vn")||shExpMatch(host,"*.viettel.com.vn")) return ITOP;
            return "DIRECT";
          }
-     - Test tu votam: curl -x http://<ip-itop>:18080 -I http://bitel.com.pe
+     - Test tu votam: curl -x http://<ip-itop>:7655 -I http://bitel.com.pe
 
   (Cach gost itop-gost/votam-gost ben tren chi con la DU PHONG.)
 

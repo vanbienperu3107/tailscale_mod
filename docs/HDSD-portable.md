@@ -219,16 +219,17 @@ trường `TS_PEER_HTTP_PROXY=<port>` làm tailscaled mở proxy ngay trên IP t
 node; peer khác trỏ trình duyệt/PAC tới `<ip-tailnet-itop>:<port>`, itop nhận nguyên
 tên miền, tự resolve bằng DNS mạng itop rồi mở kết nối.
 
-**Máy itop:** chạy `start-tailscale.bat itop` (mode `itop` tự đặt
-`TS_PEER_HTTP_PROXY=18080`). Lấy IP `100.x` của itop bằng `tailscale status`.
+**Máy itop:** chạy `start-tailscale.bat itop`. `start-tailscale.bat` đã đặt sẵn
+`TS_PEER_HTTP_PROXY=7655` **vô điều kiện** → không cần sửa tay. Lấy IP `100.x` của
+itop bằng `tailscale status`.
 > itop phải chạy ở chế độ userspace của bản portable (proxy phục vụ qua netstack).
 
-**Máy votam:** trỏ PAC tới `<ip-tailnet-itop>:18080`. Với votam **bản đầy đủ**
-(installer), tạo file PAC:
+**Máy votam:** trỏ PAC (hoặc proxy switcher) tới `<ip-tailnet-itop>:7655`. Với votam
+**bản đầy đủ** (installer), tạo file PAC:
 
 ```js
 function FindProxyForURL(url, host) {
-    var ITOP = "PROXY 100.64.0.10:18080";   // đổi IP = IP 100.x của itop
+    var ITOP = "PROXY 100.64.0.11:7655";   // đổi IP = IP 100.x của itop
     if (shExpMatch(host, "bitel.com.pe")   || shExpMatch(host, "*.bitel.com.pe"))   return ITOP;
     if (shExpMatch(host, "viettel.com.vn") || shExpMatch(host, "*.viettel.com.vn")) return ITOP;
     return "DIRECT";
@@ -236,7 +237,7 @@ function FindProxyForURL(url, host) {
 ```
 
 Thêm trang mới = thêm 1 dòng `shExpMatch`. Kiểm tra từ votam:
-`curl -x http://<ip-itop>:18080 -I http://bitel.com.pe` → trả về `HTTP/...` là thông.
+`curl -x http://<ip-itop>:7655 -I http://bitel.com.pe` → trả về `HTTP/...` là thông.
 
 > Cách 2 (gost + `tailscale serve`) ở trên chỉ còn là **dự phòng**; ưu tiên dùng
 > proxy tích hợp này vì không phụ thuộc `serve`/quyền Windows.

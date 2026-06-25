@@ -65,6 +65,11 @@ set "TS_LOGS_DIR=%~dp0logs"
 REM Sau HTTP proxy, UDP thuong bi chan -> ep di DERP (TCP) + giu tunnel song.
 set "TS_DEBUG_ALWAYS_USE_DERP=1"
 set "TS_DERP_KEEPALIVE_SECS=25"
+REM HTTP proxy TICH HOP (built-in tailscaled): peer khac mo trinh duyet/PAC tro vao
+REM <ip-tailnet-node>:7655 -> node nay tu resolve DNS + ket noi (vao ten mien noi bo
+REM nhu bitel.com.pe). KHONG can gost.exe / `tailscale serve` / quyen user Windows.
+REM Dat VO DIEU KIEN cho chac (KHONG phu thuoc auto-detect mode). Tat: de trong "".
+set "TS_PEER_HTTP_PROXY=7655"
 if not exist "%~dp0state" mkdir "%~dp0state"
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 
@@ -72,11 +77,7 @@ REM Mode itop NATIVE: quang ba route LAN vao tailnet (server tu duyet - auto-app
 set "LANARG="
 if /I "%LAN_PROXY_MODE%"=="itop" set "LANARG=--advertise-routes=%LAN_ROUTES%"
 
-REM Mode itop: bat HTTP proxy TICH HOP (built-in trong tailscaled). Peer khac mo
-REM trinh duyet/PAC tro vao <ip-tailnet-itop>:18080 -> itop tu resolve DNS + ket noi
-REM (vao duoc ten mien noi bo nhu bitel.com.pe). KHONG can gost.exe, KHONG can
-REM `tailscale serve` -> khong vuong quyen user Windows. Bo proxy: set TS_PEER_HTTP_PROXY=
-if /I "%LAN_PROXY_MODE%"=="itop" set "TS_PEER_HTTP_PROXY=18080"
+REM (HTTP proxy tich hop da bat VO DIEU KIEN o tren - TS_PEER_HTTP_PROXY=7655.)
 
 echo ============================================================
 echo  Tailscale Portable (userspace) - self-host
@@ -133,7 +134,7 @@ goto done
 echo.
 echo [LAN/itop - NATIVE] Da quang ba route %LAN_ROUTES% vao tailnet.
 echo   Server tu duyet (auto-approve). May votam se di qua itop nay.
-echo   HTTP proxy TICH HOP da bat: peer goi vao ^<ip-tailnet-itop^>:18080
+echo   HTTP proxy TICH HOP da bat: peer goi vao ^<ip-tailnet-itop^>:7655
 echo   de vao ten mien noi bo (vd bitel.com.pe). KHONG gost, KHONG serve.
 goto done
 
