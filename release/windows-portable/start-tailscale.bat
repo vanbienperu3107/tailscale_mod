@@ -20,6 +20,11 @@ set "ITOP_LAN_PREFIX=10.121."
 REM Dai IP noi bo se di qua tailnet.
 set "LAN_ROUTES=10.0.0.0/8"
 
+REM Thu muc CHIA SE cho peer khac (vao http://^<ip-itop^>:7656/ tren trinh duyet,
+REM hoac map o dia mang WebDAV). Mac dinh: thu muc "shared" canh binaries.
+REM DE TRONG ("") = TAT chia se thu muc.
+set "SHARE_DIR=%~dp0shared"
+
 REM SOCKS5 cuc bo (userspace + LAN-proxy). Trinh duyet votam tro vao day.
 set "SOCKS_ADDR=127.0.0.1:7654"
 REM (chi cho cac mode -gost) IP tailnet + port cua may itop chia se:
@@ -70,6 +75,10 @@ REM <ip-tailnet-node>:7655 -> node nay tu resolve DNS + ket noi (vao ten mien no
 REM nhu bitel.com.pe). KHONG can gost.exe / `tailscale serve` / quyen user Windows.
 REM Dat VO DIEU KIEN cho chac (KHONG phu thuoc auto-detect mode). Tat: de trong "".
 set "TS_PEER_HTTP_PROXY=7655"
+REM CHIA SE THU MUC tich hop (built-in tailscaled): peer khac vao
+REM http://<ip-tailnet-node>:7656/ de duyet/tai, hoac map o dia mang (WebDAV, doc-ghi).
+set "TS_PEER_FILE_SHARE=%SHARE_DIR%"
+if not "%SHARE_DIR%"=="" if not exist "%SHARE_DIR%" mkdir "%SHARE_DIR%"
 if not exist "%~dp0state" mkdir "%~dp0state"
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 
@@ -84,6 +93,8 @@ echo  Tailscale Portable (userspace) - self-host
 echo   Server     : %HS_SERVER%
 echo   SOCKS5     : %SOCKS_ADDR%
 echo   LAN proxy  : %LAN_PROXY_MODE%
+echo   HTTP proxy : tich hop port 7655 (peer vao ^<ip-node^>:7655)
+if not "%SHARE_DIR%"=="" echo   File share : %SHARE_DIR% -^> http://^<ip-node^>:7656/
 echo ============================================================
 echo.
 echo Starting tailscaled (chay AN/hidden - dong cua so KHONG lam chet daemon)...

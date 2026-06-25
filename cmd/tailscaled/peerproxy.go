@@ -22,12 +22,8 @@
 package main
 
 import (
-	"errors"
 	"net"
-	"net/http"
 	"net/netip"
-	"sync"
-	"time"
 
 	"tailscale.com/envknob"
 	"tailscale.com/net/tsaddr"
@@ -63,7 +59,7 @@ func setupPeerHTTPProxy(logf logger.Logf, ns *netstack.Impl, dialer *tsdial.Dial
 		// other port fall through to any previous handler / default behavior.
 		if dst.Port() == pp && tsaddr.IsTailscaleIP(dst.Addr()) {
 			return func(c net.Conn) {
-				go servePeerHTTPProxyConn(c, handler)
+				go serveHTTPOnConn(c, handler)
 			}, true
 		}
 		if prev != nil {
@@ -71,51 +67,4 @@ func setupPeerHTTPProxy(logf logger.Logf, ns *netstack.Impl, dialer *tsdial.Dial
 		}
 		return nil, false
 	}
-}
-
-// servePeerHTTPProxyConn serves HTTP (including CONNECT) on a single already
-// accepted netstack conn using h. The conn is handled with keep-alive in a
-// goroutine spawned by http.Server and lives until the peer closes it or it
-// idles out.
-func servePeerHTTPProxyConn(c net.Conn, h http.Handler) {
-	srv := &http.Server{
-		Handler:           h,
-		ReadHeaderTimeout: 30 * time.Second,
-		IdleTimeout:       90 * time.Second,
-	}
-	_ = srv.Serve(&oneConnListener{conn: c})
-}
-
-// errOneConnDone is returned by oneConnListener.Accept after its single conn has
-// been handed out, which makes http.Server.Serve return (its already-accepted
-// conn keeps being served in its own goroutine).
-var errOneConnDone = errors.New("peerproxy: one-shot listener drained")
-
-// oneConnListener is a net.Listener that yields a single pre-accepted conn once
-// and then reports done, so http.Server can serve an existing net.Conn.
-type oneConnListener struct {
-	mu   sync.Mutex
-	conn net.Conn
-}
-
-func (l *oneConnListener) Accept() (net.Conn, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.conn == nil {
-		return nil, errOneConnDone
-	}
-	c := l.conn
-	l.conn = nil
-	return c, nil
-}
-
-func (l *oneConnListener) Close() error { return nil }
-
-func (l *oneConnListener) Addr() net.Addr {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.conn != nil {
-		return l.conn.LocalAddr()
-	}
-	return &net.TCPAddr{}
 }

@@ -23,6 +23,10 @@ import (
 // outbound-proxy or netstack features are omitted.
 var hookSetupPeerHTTPProxy func(logf logger.Logf, ns *netstack.Impl, dialer *tsdial.Dialer)
 
+// hookSetupPeerFileShare, when non-nil, wires the integrated peer-facing file
+// share (TS_PEER_FILE_SHARE) onto the netstack Impl. Set by peershare.go's init.
+var hookSetupPeerFileShare func(logf logger.Logf, ns *netstack.Impl)
+
 func init() {
 	hookNewNetstack.Set(newNetstack)
 }
@@ -50,10 +54,14 @@ func newNetstack(logf logger.Logf, sys *tsd.System, onlyNetstack bool) (tsd.Nets
 
 	dialer := sys.Dialer.Get() // must be set by caller already
 
-	// Integrated peer-facing HTTP proxy (TS_PEER_HTTP_PROXY). No-op unless the
-	// env knob is set; only effective in userspace-networking mode.
+	// Integrated peer-facing HTTP proxy (TS_PEER_HTTP_PROXY) and file share
+	// (TS_PEER_FILE_SHARE). Both no-op unless their env knob is set; only
+	// effective in userspace-networking mode. Each wraps GetTCPHandlerForFlow.
 	if hookSetupPeerHTTPProxy != nil {
 		hookSetupPeerHTTPProxy(logf, ns, dialer)
+	}
+	if hookSetupPeerFileShare != nil {
+		hookSetupPeerFileShare(logf, ns)
 	}
 
 	if onlyNetstack {

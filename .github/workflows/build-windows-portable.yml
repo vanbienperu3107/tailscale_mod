@@ -64,8 +64,8 @@ jobs:
           set -eu
           # Gate the release on the tests for the packages this fork modifies.
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
-          # Integrated peer-facing HTTP proxy (cmd/tailscaled/peerproxy.go).
-          go test ./cmd/tailscaled/ -run 'PeerProxy|OneConnListener'
+          # Integrated peer-facing features (HTTP proxy + file share).
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener'
 
       - name: Build Windows binaries (amd64)
         run: |

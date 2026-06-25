@@ -242,6 +242,31 @@ Thêm trang mới = thêm 1 dòng `shExpMatch`. Kiểm tra từ votam:
 > Cách 2 (gost + `tailscale serve`) ở trên chỉ còn là **dự phòng**; ưu tiên dùng
 > proxy tích hợp này vì không phụ thuộc `serve`/quyền Windows.
 
+### Cách 2c: Chia sẻ thư mục của itop (file share tích hợp)
+
+Bản mod **tích hợp sẵn file server trong tailscaled** (cùng cơ chế với proxy, không
+cần `tailscale serve`/quyền Windows). Biến `TS_PEER_FILE_SHARE=<đường-dẫn>` làm
+tailscaled phục vụ thư mục đó trên IP tailnet, port `7656` (đổi bằng
+`TS_PEER_FILE_SHARE_PORT`). Hỗ trợ **đọc + ghi** qua WebDAV và duyệt/tải qua trình duyệt.
+
+**Máy itop:** `start-tailscale.bat` đã đặt sẵn `TS_PEER_FILE_SHARE` = thư mục
+`shared\` cạnh binaries (đổi bằng biến `SHARE_DIR`, để trống = tắt). Thả file cần
+chia sẻ vào thư mục đó.
+
+**Máy votam — 2 cách dùng:**
+
+1. **Trình duyệt (xem + tải):** mở `http://<ip-100.x-itop>:7656/` → duyệt + tải file.
+2. **Ổ đĩa mạng (đọc + ghi):** map WebDAV thành ổ đĩa:
+   ```
+   net use Z: http://<ip-100.x-itop>:7656/ /persistent:yes
+   ```
+   > Windows mặc định chặn Basic auth WebDAV trên HTTP; share này không auth (dựa
+   > vào ACL tailnet). Nếu map ổ báo lỗi, bật dịch vụ **WebClient** và đặt registry
+   > `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel=2`.
+
+> ⚠️ ACL tailnet đang allow-all → **mọi node** đọc/ghi được thư mục này. Chỉ để dữ
+> liệu phù hợp; siết bằng ACL nếu cần.
+
 ---
 
 ## 7. Cấu hình HTTP proxy (proxy.conf)

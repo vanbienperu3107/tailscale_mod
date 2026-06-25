@@ -80,6 +80,14 @@ Van bundle san gost.exe + test-lan.bat. Dung khi can:
 
   (Cach gost itop-gost/votam-gost ben tren chi con la DU PHONG.)
 
+  >> CHIA SE THU MUC (file share TICH HOP):
+     - May itop: start-tailscale.bat da chia se san thu muc "shared\" canh
+       binaries (doi bang bien SHARE_DIR; de trong = tat). Tha file vao do.
+     - May votam:
+         + Trinh duyet (xem+tai): mo  http://<ip-100.x-itop>:7656/
+         + O dia mang (doc+ghi):  net use Z: http://<ip-100.x-itop>:7656/
+     - Khong can gost / `tailscale serve`. ACL allow-all -> moi node doc+ghi duoc.
+
 TEST NHANH (che do gost): chay test-lan.bat
   - tren itop: MODE=itop  -> tu in PASS/FAIL (serve da dua 18080 len tailnet)
   - tren votam: MODE=votam -> thu curl site noi bo qua chuoi, in PASS/FAIL

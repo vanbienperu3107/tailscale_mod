@@ -64,7 +64,7 @@ func TestServePeerHTTPProxyConn_HTTP(t *testing.T) {
 		if err != nil {
 			return
 		}
-		servePeerHTTPProxyConn(c, httpProxyHandler(dial))
+		serveHTTPOnConn(c, httpProxyHandler(dial))
 	}()
 
 	proxyURL, _ := url.Parse("http://" + ln.Addr().String())
@@ -120,7 +120,7 @@ func TestServePeerHTTPProxyConn_CONNECT(t *testing.T) {
 		if err != nil {
 			return
 		}
-		servePeerHTTPProxyConn(c, httpProxyHandler(dial))
+		serveHTTPOnConn(c, httpProxyHandler(dial))
 	}()
 
 	pc, err := net.Dial("tcp", ln.Addr().String())
