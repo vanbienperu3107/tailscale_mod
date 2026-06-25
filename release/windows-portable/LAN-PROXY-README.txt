@@ -57,8 +57,17 @@ Van bundle san gost.exe + test-lan.bat. Dung khi can:
      -> chay gost(:18080) + `tailscale serve --tcp 18080`.
   Tren may MUON DUNG: set "LAN_PROXY_MODE=votam-gost"
      -> chay gost bridge 18888 -> SOCKS5 7654 -> itop:18080.
-     -> trong tailscale-proxy.pac, doi dong proxy thanh:
-          return "PROXY 127.0.0.1:18888";
+     -> tailscale-proxy.pac DA san dinh tuyen qua gost (PROXY 127.0.0.1:18888),
+        KHONG can sua tay nua.
+
+  ** VAO TRANG CHI ITOP MO DUOC (ten mien noi bo / chan theo vung) **
+  Vi du bitel.com.pe, viettel.com.vn: cac trang nay PHAI duoc resolve DNS +
+  ket noi TAI itop, nen BAT BUOC dung che do gost (itop-gost + votam-gost).
+  Chung da co san trong tailscale-proxy.pac. Muon them trang: mo
+  tailscale-proxy.pac, them 1 dong trong khoi "DOMAIN", vi du:
+       if (shExpMatch(host, "abc.com") || shExpMatch(host, "*.abc.com")) return ITOP;
+  Tren may votam, dat ITOP_TS_IP = IP tailnet (100.x) cua may itop trong
+  start-tailscale.bat truoc khi chay votam-gost.
 
 TEST NHANH (che do gost): chay test-lan.bat
   - tren itop: MODE=itop  -> tu in PASS/FAIL (serve da dua 18080 len tailnet)

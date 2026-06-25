@@ -1,15 +1,29 @@
-// PAC (NATIVE): moi dia chi 10.x.x.x di QUA itop bang SOCKS5 cua tailscale
-// (127.0.0.1:7654), con lai di THANG internet. Dung kem start-tailscale.bat
-// MODE=votam (native, KHONG gost). Hieu luc tot tren Chrome / Edge / Firefox.
+// PAC cho che do VOTAM-GOST: cac trang "chi itop vao duoc" (ten mien noi bo /
+// chan theo vung) va dai IP noi bo di QUA itop bang HTTP proxy (gost chain:
+// 127.0.0.1:18888 -> tailnet -> gost tren itop -> itop TU resolve DNS + ket noi).
+// Con lai di THANG internet. Dung kem:
+//   may itop  : start-tailscale.bat itop-gost
+//   may votam : start-tailscale.bat votam-gost
+// Hieu luc tot tren Chrome / Edge / Firefox.
+//
+// >>> THEM TRANG: chi can them 1 dong shExpMatch trong khoi "DOMAIN" duoi day. <<<
 function FindProxyForURL(url, host) {
-    // 10.0.0.0/8 = moi IP bat dau bang "10." -> qua itop (subnet route da accept)
-    if (isInNet(host, "10.0.0.0", "255.0.0.0")) return "SOCKS5 127.0.0.1:7654";
+    var ITOP = "PROXY 127.0.0.1:18888";  // gost chain toi itop
 
-    // (Tuy chon) neu truy cap bang TEN MIEN noi bo, bo comment + sua duoi:
-    // if (dnsDomainIs(host, ".corp.local")) return "SOCKS5 127.0.0.1:7654";
+    // ===== DOMAIN: cac trang chi itop vao duoc (resolve TAI itop) =====
+    if (shExpMatch(host, "bitel.com.pe")   || shExpMatch(host, "*.bitel.com.pe"))   return ITOP;
+    if (shExpMatch(host, "viettel.com.vn") || shExpMatch(host, "*.viettel.com.vn")) return ITOP;
+    // Them domain moi o day, vi du:
+    // if (shExpMatch(host, "intranet.itop") || shExpMatch(host, "*.intranet.itop")) return ITOP;
 
-    // === DU PHONG (mode votam-gost) ===
-    // Neu dung che do gost cu, doi dong tren thanh: return "PROXY 127.0.0.1:18888";
+    // ===== DAI IP noi bo (neu truy cap bang IP, khong phai ten mien) =====
+    if (isInNet(host, "10.0.0.0",    "255.0.0.0"))   return ITOP;
+    if (isInNet(host, "172.16.0.0",  "255.240.0.0")) return ITOP;
+    if (isInNet(host, "192.168.0.0", "255.255.0.0")) return ITOP;
 
-    return "DIRECT";
+    // ===== DU PHONG (che do votam NATIVE, khong gost) =====
+    // Neu chay 'votam' (khong gost) va chi can dai IP noi bo, doi cac dong tren
+    // thanh: return "SOCKS5 127.0.0.1:7654";  (luc do ten mien noi bo se KHONG vao duoc).
+
+    return "DIRECT";  // moi thu khac di thang internet
 }

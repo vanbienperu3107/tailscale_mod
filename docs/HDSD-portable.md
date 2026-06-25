@@ -203,9 +203,27 @@ votam browser
 
 **Máy votam:** Đổi `LAN_PROXY_MODE=votam-gost`
 - Gost bridge: `127.0.0.1:18888 → SOCKS5:7654 → itop:18080`
-- Trong PAC file đổi proxy thành `PROXY 127.0.0.1:18888`
+- PAC file đã sẵn định tuyến qua gost (`PROXY 127.0.0.1:18888`) — **không cần sửa tay**
+- Đặt `ITOP_TS_IP` = IP tailnet (100.x) của máy itop trong `start-tailscale.bat`
 
 **Kiểm tra nhanh:** Chạy `test-lan.bat` trên cả hai máy.
+
+### Cách 2b: Vào trang chỉ itop mở được (tên miền nội bộ / chặn theo vùng)
+
+Ví dụ `bitel.com.pe`, `viettel.com.vn` — các trang này phải được **phân giải DNS
+và kết nối tại phía itop** (votam không resolve được / không vào trực tiếp được).
+Bắt buộc dùng chế độ gost (`itop-gost` + `votam-gost`): itop nhận nguyên tên miền,
+tự resolve bằng DNS mạng itop rồi mở kết nối.
+
+Hai tên miền trên đã có sẵn trong `tailscale-proxy.pac`. Thêm trang mới: mở
+`tailscale-proxy.pac`, thêm 1 dòng trong khối `DOMAIN`:
+
+```js
+if (shExpMatch(host, "abc.com") || shExpMatch(host, "*.abc.com")) return ITOP;
+```
+
+> ⚠️ Chế độ `itop-gost` dùng `tailscale serve --tcp`. Cần xác nhận `serve` hoạt
+> động với headscale vpn2 hiện tại bằng `test-lan.bat` trước khi dùng thật.
 
 ---
 
