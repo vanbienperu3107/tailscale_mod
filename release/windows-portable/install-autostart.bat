@@ -44,6 +44,13 @@ if errorlevel 1 goto fail
 
 echo.
 echo XONG. Tu gio Tailscale tu chay AN moi khi ban dang nhap Windows (mode tu nhan dien).
+
+REM URL ACL cho PAC agent (HttpListener 127.0.0.1:<port>) - de bind duoc ca khi KHONG admin.
+REM Mac dinh port 7658; doi PAC_SERVER_PORT neu dashboard cap port khac.
+if not defined PAC_SERVER_PORT set "PAC_SERVER_PORT=7658"
+echo Cap URL ACL cho PAC agent port %PAC_SERVER_PORT% ...
+netsh http add urlacl url=http://127.0.0.1:%PAC_SERVER_PORT%/ user=Everyone >nul 2>&1
+
 echo Chay thu ngay bay gio...
 schtasks /Run /TN "%TASKNAME%" >nul 2>&1
 echo.

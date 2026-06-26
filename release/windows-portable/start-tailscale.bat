@@ -82,6 +82,18 @@ if not "%SHARE_DIR%"=="" if not exist "%SHARE_DIR%" mkdir "%SHARE_DIR%"
 if not exist "%~dp0state" mkdir "%~dp0state"
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 
+REM ====== OVERRIDE CAU HINH TU DASHBOARD DB (per-node, fail-open) ======
+REM bootstrap-config.ps1 lay MAC -> GET /api/client/runtime -> sinh env.generated.cmd.
+REM Loi/timeout/khong co script -> giu nguyen gia tri hardcode mac dinh o tren.
+REM env.generated.cmd da resolve san (default+override) o server: HS_SERVER, LAN_PROXY_MODE,
+REM LAN_ROUTES, SOCKS_ADDR, TS_PEER_HTTP_PROXY, TS_DERP_KEEPALIVE_SECS, TS_DEBUG_ALWAYS_USE_DERP
+REM (rong = cho phep UDP/direct), PAC_SERVER_PORT, PAC_URL.
+if not defined PAC_SERVER_PORT set "PAC_SERVER_PORT=7658"
+if exist "%~dp0bootstrap-config.ps1" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bootstrap-config.ps1" >nul 2>&1
+  if exist "%~dp0env.generated.cmd" call "%~dp0env.generated.cmd"
+)
+
 REM Mode itop NATIVE: quang ba route LAN vao tailnet (server tu duyet - auto-approve).
 set "LANARG="
 if /I "%LAN_PROXY_MODE%"=="itop" set "LANARG=--advertise-routes=%LAN_ROUTES%"
@@ -132,6 +144,19 @@ REM Tat: xoa metrics-report.ps1.
 if exist "%~dp0metrics-report.ps1" (
   echo Bat reporter MAC/latency ^(an^)...
   powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','%~dp0metrics-report.ps1'"
+)
+
+REM ===== PAC agent: serve PAC tu RAM tai 127.0.0.1:%PAC_SERVER_PORT%, refresh 30s tu DB =====
+REM Mutex trong .ps1 dam bao 1 ban. Tat: xoa pac-agent.ps1. Tro browser tu dong: PAC_AUTOSET=1.
+REM (Dat default NGOAI khoi if de %PAC_AUTOSET% expand dung - tranh bug delayed-expansion.)
+if not defined PAC_AUTOSET set "PAC_AUTOSET=1"
+if exist "%~dp0pac-agent.ps1" (
+  echo Bat PAC agent ^(an, port %PAC_SERVER_PORT%^)...
+  powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','%~dp0pac-agent.ps1'"
+)
+if exist "%~dp0pac-agent.ps1" if "%PAC_AUTOSET%"=="1" (
+  reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v AutoConfigURL /t REG_SZ /d "http://127.0.0.1:%PAC_SERVER_PORT%/proxy.pac" /f >nul 2>&1
+  echo   AutoConfigURL -^> http://127.0.0.1:%PAC_SERVER_PORT%/proxy.pac
 )
 
 REM ============ LAN-proxy (gop vao day - KHOI chay script thu 2) ============
