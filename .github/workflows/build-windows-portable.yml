@@ -123,7 +123,9 @@ jobs:
              release/windows-portable/install-autostart.bat \
              release/windows-portable/uninstall-autostart.bat \
              release/windows-portable/run-hidden.vbs \
-             release/windows-portable/metrics-report.ps1 "dist/${portable}/"
+             release/windows-portable/metrics-report.ps1 \
+             release/windows-portable/bootstrap-config.ps1 \
+             release/windows-portable/pac-agent.ps1 "dist/${portable}/"
           ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
 
           # Installer (full VPN service - bundles wintun.dll)
@@ -242,7 +244,7 @@ jobs:
           # 1) Files present in the portable package
           $gost = Join-Path $dir "gost.exe"
           if (-not (Test-Path $gost)) { throw "FAIL: gost.exe not bundled in portable zip" }
-          foreach ($f in @("tailscale-proxy.pac","LAN-PROXY-README.txt","start-itop.bat","start-votam.bat","install-autostart.bat","uninstall-autostart.bat","run-hidden.vbs","metrics-report.ps1")) {
+          foreach ($f in @("tailscale-proxy.pac","LAN-PROXY-README.txt","start-itop.bat","start-votam.bat","install-autostart.bat","uninstall-autostart.bat","run-hidden.vbs","metrics-report.ps1","bootstrap-config.ps1","pac-agent.ps1")) {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "FAIL: LAN-proxy file missing: $f" }
           }
           # Autostart must launch silently via wscript+run-hidden.vbs (no console flash).
