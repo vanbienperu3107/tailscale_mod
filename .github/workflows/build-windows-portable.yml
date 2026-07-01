@@ -194,6 +194,55 @@ jobs:
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           }
 
+  launcher-test:
+    name: Node launcher live test (reaches headscale)
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: dist
+
+      - name: Run the single-file node launcher and verify it reaches control
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = (Get-ChildItem dist/tailscale-node-portable-windows-amd64-*.exe | Select-Object -First 1).FullName
+          if (-not $exe) { throw "FAIL: node exe not found" }
+          Write-Host "Launcher: $exe"
+          (& $exe version 2>&1 | Out-String) | Write-Host
+
+          # Run the launcher exactly like a user double-clicking it: it forks the
+          # daemon and attempts 'up' against the baked self-host headscale (vpn2).
+          # 'up' blocks on OIDC login, so run in the background and inspect state.
+          $p = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden -WorkingDirectory (Split-Path $exe)
+          $ok = $false
+          try {
+            for ($i = 0; $i -lt 25; $i++) {
+              Start-Sleep -Seconds 3
+              $st = (& $exe status 2>&1 | Out-String)
+              Write-Host "--- status @$i ---"
+              ($st -split "`n" | Select-Object -First 5) | ForEach-Object { Write-Host $_ }
+              if ($st -match "NeedsLogin|Logged out|To authenticate|log in at|register|vpn2\.hangocthanh") {
+                $ok = $true; Write-Host ">> reached self-host headscale control (needs login)."; break
+              }
+            }
+            $log = Join-Path (Split-Path $exe) "state/logs/tailscaled.log"
+            if (Test-Path $log) {
+              Write-Host "----- tailscaled.log (tail 30) -----"
+              (Get-Content $log -Tail 30) | ForEach-Object { Write-Host $_ }
+            }
+          }
+          finally {
+            (& $exe stop 2>&1 | Out-String) | Write-Host
+            Get-Process | Where-Object { $_.ProcessName -like "tailscale-node*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          }
+          if (-not $ok) { throw "FAIL: launcher never reached headscale control (see log above)" }
+          Write-Host "PASS: single-file node launcher started the daemon and reached the self-host headscale (NeedsLogin)."
+
   release:
     name: Publish versioned release
     needs: [build, smoke-test] # build is required to read its version outputs
