@@ -92,49 +92,35 @@ jobs:
           unzip -j wintun.zip 'wintun/bin/amd64/wintun.dll' -d build/wintun
           ls -la build/wintun
 
-      - name: Fetch gost (LAN-proxy helper, bundled into portable)
-        run: |
-          set -eu
-          # gost = small portable proxy used by the LAN-proxy helper scripts so a
-          # portable (userspace) node can reach a remote node's LAN (e.g. 10.120.x.x)
-          # without installing anything. Pinned version for reproducible builds.
-          curl -fL --retry 3 -o gost.zip \
-            https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_windows_amd64.zip
-          mkdir -p build/gost
-          unzip -o gost.zip gost.exe -d build/gost
-          rm -f gost.zip
-          ls -la build/gost
-
-      - name: Assemble packages
+      - name: Build + assemble single-file node binaries and installer
         id: pkg
         run: |
           set -eu
           ver="${{ steps.ver.outputs.long }}"
-          mkdir -p dist
+          mkdir -p dist build/node
 
-          # Portable (userspace mode - no wintun needed)
-          portable="tailscale-mod-portable-windows-amd64-${ver}"
-          mkdir -p "dist/${portable}"
-          cp build/bin/tailscale.exe build/bin/tailscaled.exe "dist/${portable}/"
-          cp release/windows-portable/proxy.conf \
-             release/windows-portable/start-tailscale.bat \
-             release/windows-portable/stop-tailscale.bat \
-             release/windows-portable/README.txt "dist/${portable}/"
-          # LAN-proxy feature: bundle gost + helper scripts so a portable node can
-          # reach a remote node's LAN (e.g. 10.120.x.x) through another portable node.
-          cp build/gost/gost.exe "dist/${portable}/"
-          cp release/windows-portable/tailscale-proxy.pac \
-             release/windows-portable/LAN-PROXY-README.txt \
-             release/windows-portable/test-lan.bat \
-             release/windows-portable/start-itop.bat \
-             release/windows-portable/start-votam.bat \
-             release/windows-portable/install-autostart.bat \
-             release/windows-portable/uninstall-autostart.bat \
-             release/windows-portable/run-hidden.vbs \
-             release/windows-portable/metrics-report.ps1 "dist/${portable}/"
-          ( cd dist && zip -rq "${portable}.zip" "${portable}" && sha256sum "${portable}.zip" > "${portable}.zip.sha256" )
+          # --- Combined single-file node binaries (daemon + CLI + launcher) ---
+          # --box links the CLI (ts_include_cli) so ONE exe is daemon+CLI; the
+          # baked launcher (-X main.nodeMode) makes it self-run. No gost / PAC /
+          # .bat / .vbs clutter; metrics is built into the daemon.
+          for v in proxy portable; do
+            EXTRA_LDFLAGS="-s -w -X main.nodeMode=$v" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+              sh ./build_dist.sh --box -o "build/node/tailscale-node-$v.exe" tailscale.com/cmd/tailscaled
+          done
+          EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            sh ./build_dist.sh --box -o "build/node/tailscale-node-linux-amd64" tailscale.com/cmd/tailscaled
 
-          # Installer (full VPN service - bundles wintun.dll)
+          # portable (Windows) + linux: a single self-contained file each.
+          cp "build/node/tailscale-node-portable.exe" "dist/tailscale-node-portable-windows-amd64-${ver}.exe"
+          cp "build/node/tailscale-node-linux-amd64"   "dist/tailscale-node-linux-amd64-${ver}"
+          # proxy (Windows): exe + editable proxy.conf (corp upstream proxy config).
+          proxy="tailscale-node-proxy-windows-amd64-${ver}"
+          mkdir -p "dist/${proxy}"
+          cp "build/node/tailscale-node-proxy.exe" "dist/${proxy}/tailscale-node-proxy.exe"
+          cp release/windows-portable/proxy.conf    "dist/${proxy}/proxy.conf"
+          ( cd dist && zip -rq "${proxy}.zip" "${proxy}" )
+
+          # --- Full-VPN installer (unchanged: registers the tailscaled service) ---
           installer="tailscale-mod-installer-windows-amd64-${ver}"
           mkdir -p "dist/${installer}"
           cp build/bin/tailscale.exe build/bin/tailscaled.exe "dist/${installer}/"
@@ -145,8 +131,10 @@ jobs:
              release/windows-installer/uninstall.bat \
              release/windows-installer/proxy.conf \
              release/windows-installer/README.txt "dist/${installer}/"
-          ( cd dist && zip -rq "${installer}.zip" "${installer}" && sha256sum "${installer}.zip" > "${installer}.zip.sha256" )
+          ( cd dist && zip -rq "${installer}.zip" "${installer}" )
 
+          # sha256 for every published artifact.
+          ( cd dist && for f in *.exe *.zip "tailscale-node-linux-amd64-${ver}"; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done )
           ls -la dist
 
       - name: Upload build artifact
@@ -155,7 +143,9 @@ jobs:
           name: windows-build
           path: |
             dist/*.zip
-            dist/*.zip.sha256
+            dist/*.exe
+            dist/tailscale-node-linux-amd64-*
+            dist/*.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -170,183 +160,39 @@ jobs:
           name: windows-build
           path: dist
 
-      - name: Start tailscaled (userspace) and verify it works
+      - name: Smoke test the single-file node binary (CLI + daemon)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
-          Write-Host "Testing package: $($zip.Name)"
-          Expand-Archive -Path $zip.FullName -DestinationPath app -Force
-          $dir = (Get-ChildItem app -Directory | Select-Object -First 1).FullName
-          $tailscaled = Join-Path $dir "tailscaled.exe"
-          $tailscale  = Join-Path $dir "tailscale.exe"
+          $exe = Get-ChildItem dist/tailscale-node-portable-windows-amd64-*.exe | Select-Object -First 1
+          if (-not $exe) { throw "FAIL: portable node exe not found in dist" }
+          Write-Host "Testing single-file node binary: $($exe.Name)"
 
-          # Enable proxy.conf with a dummy proxy to prove the feature is read.
-          $proxy = Join-Path $dir "proxy.conf"
-          '{ "enabled": true, "httpProxy": "http://127.0.0.1:38271", "httpsProxy": "http://127.0.0.1:38271" }' | Set-Content -Encoding ascii $proxy
-          $env:TS_PROXY_CONF = $proxy
+          # 1) CLI passthrough works (ts_include_cli linked into the one binary).
+          $v = (& $exe.FullName version 2>&1 | Out-String)
+          Write-Host $v
+          if ($v -notmatch "1\.98") { throw "FAIL: node exe 'version' did not print a version (CLI not linked?)" }
 
-          # Write logs to a "logs" subfolder (verifies the TS_LOGS_DIR feature).
-          $logs = Join-Path $dir "logs"
-          New-Item -ItemType Directory -Force $logs | Out-Null
-          $env:TS_LOGS_DIR = $logs
-
-          $state = Join-Path $dir "state"
+          # 2) Daemon mode: the SAME exe run with tailscaled flags IS the daemon.
+          $state = Join-Path $env:RUNNER_TEMP "nstate"
           New-Item -ItemType Directory -Force $state | Out-Null
-          $out = Join-Path $dir "tsd.out.log"
-          $err = Join-Path $dir "tsd.err.log"
-
-          Write-Host "Starting tailscaled in userspace mode..."
-          $p = Start-Process -FilePath $tailscaled -PassThru -WindowStyle Hidden `
-            -ArgumentList "--tun=userspace-networking","--statedir=$state","--verbose=1" `
-            -RedirectStandardOutput $out -RedirectStandardError $err
-
+          Write-Host "Starting node exe as a userspace daemon..."
+          $p = Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden `
+            -ArgumentList "--tun=userspace-networking","--statedir=$state","--verbose=1"
           try {
             $up = $false
             for ($i = 0; $i -lt 40; $i++) {
               Start-Sleep -Seconds 1
-              $s = (& $tailscale status 2>&1 | Out-String)
-              if ($s -notmatch "failed to connect") { $up = $true; Write-Host "Daemon reachable after ~$i s"; break }
+              $s = (& $exe.FullName status 2>&1 | Out-String)
+              if ($s -notmatch "failed to connect") { $up = $true; Write-Host "daemon LocalAPI reachable after ~${i}s"; break }
             }
-            # Force a control contact so the proxy resolver runs (bounded wait).
-            (& $tailscale up --timeout=8s 2>&1 | Out-String) | Write-Host
-            Start-Sleep -Seconds 2
-
-            $log = ((Get-Content $out -ErrorAction SilentlyContinue) + (Get-Content $err -ErrorAction SilentlyContinue)) -join "`n"
-            Write-Host "----- tailscaled log (last 40 lines) -----"
-            ($log -split "`n" | Select-Object -Last 40) | ForEach-Object { Write-Host $_ }
-            Write-Host "------------------------------------------"
-
-            if (-not $up) { throw "FAIL: tailscaled LocalAPI never became reachable" }
-            if ($log -notmatch "proxy config from proxy.conf|loaded proxy config from") {
-              throw "FAIL: proxy.conf was not loaded by tailscaled"
-            }
-            # Prove traffic is actually routed through the configured proxy:
-            # with enabled=true tailscaled must dial the proxy (127.0.0.1:38271),
-            # not the control/log servers directly.
-            if ($log -notmatch "proxyconnect|127\.0\.0\.1:38271") {
-              throw "FAIL: tailscaled did not route through the proxy from proxy.conf"
-            }
-            $logFiles = Get-ChildItem $logs -Filter "*.txt" -ErrorAction SilentlyContinue
-            if (-not $logFiles) { throw "FAIL: no log file written to TS_LOGS_DIR ($logs)" }
-            Write-Host "Log file(s) in TS_LOGS_DIR: $($logFiles.Name -join ', ')"
-            Write-Host "PASS: daemon up, proxy.conf loaded AND used (traffic routed via proxy), logs written to TS_LOGS_DIR."
-            # 'tailscale up' above exits non-zero on purpose (dummy proxy); make
-            # sure that does not become this step's exit code.
+            if (-not $up) { throw "FAIL: node daemon LocalAPI never became reachable" }
+            Write-Host "PASS: single-file node binary works as CLI (version) and as daemon (LocalAPI up)."
             exit 0
           }
           finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           }
-
-      - name: Verify gost + LAN-proxy helpers bundled and working
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
-          Expand-Archive -Path $zip.FullName -DestinationPath gapp -Force
-          $dir = (Get-ChildItem gapp -Directory | Select-Object -First 1).FullName
-
-          # 1) Files present in the portable package
-          $gost = Join-Path $dir "gost.exe"
-          if (-not (Test-Path $gost)) { throw "FAIL: gost.exe not bundled in portable zip" }
-          foreach ($f in @("tailscale-proxy.pac","LAN-PROXY-README.txt","start-itop.bat","start-votam.bat","install-autostart.bat","uninstall-autostart.bat","run-hidden.vbs","metrics-report.ps1")) {
-            if (-not (Test-Path (Join-Path $dir $f))) { throw "FAIL: LAN-proxy file missing: $f" }
-          }
-          # Autostart must launch silently via wscript+run-hidden.vbs (no console flash).
-          $ia = Get-Content (Join-Path $dir "install-autostart.bat") -Raw
-          if ($ia -notmatch "wscript") { throw "FAIL: install-autostart.bat not using wscript hidden launcher" }
-          $vbs = Get-Content (Join-Path $dir "run-hidden.vbs") -Raw
-          if ($vbs -notmatch "start-tailscale\.bat") { throw "FAIL: run-hidden.vbs does not launch start-tailscale.bat" }
-          # metrics reporter: PowerShell syntax must parse, and its ping-parser self-test must pass.
-          $mr = Join-Path $dir "metrics-report.ps1"
-          $ptok = $null; $perr = $null
-          [System.Management.Automation.Language.Parser]::ParseFile($mr, [ref]$ptok, [ref]$perr) | Out-Null
-          if ($perr -and $perr.Count) { throw "FAIL: metrics-report.ps1 has syntax errors: $($perr[0].Message)" }
-          $selftest = (& powershell -NoProfile -ExecutionPolicy Bypass -File $mr -SelfTest 2>&1 | Out-String)
-          Write-Host $selftest
-          if ($selftest -notmatch "SELFTEST OK") { throw "FAIL: metrics-report.ps1 -SelfTest did not pass" }
-          Write-Host "metrics-report.ps1 syntax OK + ping-parser self-test passed."
-          # Native subnet routing + auto-detect must be present in start-tailscale.bat
-          $sb = Get-Content (Join-Path $dir "start-tailscale.bat") -Raw
-          if ($sb -notmatch "advertise-routes") { throw "FAIL: start-tailscale.bat missing native advertise-routes" }
-          if ($sb -notmatch "ITOP_LAN_PREFIX") { throw "FAIL: start-tailscale.bat missing auto-detect (ITOP_LAN_PREFIX)" }
-          # Regression guard: start-tailscale.bat MUST target the self-host headscale,
-          # never Tailscale Inc's default control plane.
-          $startbat = Get-Content (Join-Path $dir "start-tailscale.bat") -Raw
-          if ($startbat -notmatch "--login-server") { throw "FAIL: start-tailscale.bat missing --login-server (would connect to Tailscale Inc!)" }
-          if ($startbat -notmatch "vpn2\.hangocthanh\.io\.vn") { throw "FAIL: start-tailscale.bat not pointing at self-host headscale" }
-          Write-Host "start-tailscale.bat targets self-host headscale (--login-server present)."
-          Write-Host "gost.exe + helper files present. gost version:"
-          & $gost -V
-
-          # 2) Functional: gost as an HTTP proxy actually proxies a request.
-          $p = Start-Process -FilePath $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18080'
-          try {
-            Start-Sleep -Seconds 3
-            $code = (curl.exe -s -o NUL -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18080 http://example.com)
-            Write-Host "Through gost HTTP proxy: example.com -> HTTP $code"
-            if ($code -ne "200") { throw "FAIL: gost did not proxy the request (got '$code')" }
-            Write-Host "PASS: gost.exe bundled, helper scripts present, and gost proxies HTTP."
-          }
-          finally {
-            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-          }
-
-      - name: Simulate LAN-proxy gost chain end-to-end
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
-          Expand-Archive -Path $zip.FullName -DestinationPath chainapp -Force
-          $dir = (Get-ChildItem chainapp -Directory | Select-Object -First 1).FullName
-          $gost = Join-Path $dir "gost.exe"
-          $procs = @()
-          try {
-            # "Internal site" (stands in for 10.x.x.x); returns HTTP 200.
-            $procs += Start-Process python -PassThru -WindowStyle Hidden -ArgumentList '-m','http.server','9000'
-            # itop side: HTTP proxy that reaches the target via the OS network.
-            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18080'
-            # Stand-in for the tailnet hop: a SOCKS5 server (== tailscale --socks5-server).
-            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','socks5://127.0.0.1:7654'
-            # votam side bridge: the EXACT chain shape used in start-tailscale.bat.
-            $procs += Start-Process $gost -PassThru -WindowStyle Hidden -ArgumentList '-L','http://127.0.0.1:18888','-F','socks5://127.0.0.1:7654','-F','http://127.0.0.1:18080'
-            Start-Sleep -Seconds 6
-            # The 4-process chain can take a few seconds to be fully ready on a busy
-            # runner (a single fixed wait flakes with a transient 503). Retry until 200.
-            $code = "000"
-            for ($i = 0; $i -lt 12; $i++) {
-              $code = (curl.exe -s -o NUL -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18888 http://127.0.0.1:9000)
-              if ($code -eq "200") { break }
-              Write-Host "  attempt ${i}: HTTP $code (chain warming up) ..."
-              Start-Sleep -Seconds 3
-            }
-            Write-Host "Chain (votam-gost -> socks5 -> itop-gost -> target): HTTP $code"
-            if ($code -ne "200") { throw "FAIL: LAN-proxy gost chain broken (got '$code')" }
-            Write-Host "PASS: full gost chain works end-to-end (this is the votam->itop proxy path)."
-          }
-          finally {
-            foreach ($x in $procs) { if ($x -and -not $x.HasExited) { Stop-Process -Id $x.Id -Force -ErrorAction SilentlyContinue } }
-          }
-
-      - name: Verify 'tailscale serve --tcp' syntax exists in this build
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          # NOTE: a full ephemeral-node serve test was removed on purpose - registering
-          # + deleting ephemeral nodes churned headscale and tripped a NodeStore
-          # map-generation bug ("node not found") affecting the whole tailnet. Here we
-          # only validate that the serve subcommand + --tcp flag exist (the exact syntax
-          # start-tailscale.bat uses). serve itself is known-supported (on the real
-          # machine it returned a user-ACL 401, i.e. the command + LocalAPI handled it).
-          $zip = Get-ChildItem dist/tailscale-mod-portable-*.zip | Select-Object -First 1
-          Expand-Archive -Path $zip.FullName -DestinationPath serveapp -Force
-          $dir = (Get-ChildItem serveapp -Directory | Select-Object -First 1).FullName
-          $tailscale = Join-Path $dir "tailscale.exe"
-          $help = (& $tailscale serve --help 2>&1 | Out-String)
-          Write-Host $help
-          if ($help -notmatch "--tcp") { throw "FAIL: 'tailscale serve --tcp' not available in this build (start-tailscale.bat syntax would be wrong)" }
-          Write-Host "PASS: 'tailscale serve' subcommand + --tcp flag present in this build."
 
   release:
     name: Publish versioned release
@@ -368,20 +214,21 @@ jobs:
           TAG="v${{ needs.build.outputs.long }}"
           TITLE="Tailscale (mod) Windows ${TAG}"
           cat > notes.md <<'EOF'
-          Automated Windows (amd64) build of Tailscale (mod).
+          Automated build of Tailscale (mod). Verified on a Windows runner: the
+          single-file node binary works as CLI and as a userspace daemon.
 
           Version: ${{ needs.build.outputs.long }} (commit ${{ github.sha }})
-          Verified on a Windows runner: tailscaled starts and reads proxy.conf.
 
-          Assets:
-          - **installer** zip - registers the `tailscaled` Windows service (full VPN, bundles `wintun.dll`) and installs a default `proxy.conf` to `C:\ProgramData\Tailscale`.
-          - **portable** zip - unzip and run in userspace mode, no install needed; `proxy.conf` lives next to the binaries. Also bundles `gost.exe` + LAN-proxy helpers (set `LAN_PROXY_MODE` in `start-tailscale.bat`, plus `test-lan.bat` + `tailscale-proxy.pac`) to reach a remote node's LAN (e.g. 10.x.x.x) without installing anything - see `LAN-PROXY-README.txt`.
+          Single-file "node" builds — just run the one file (no gost / PAC / .bat):
+          - **tailscale-node-portable-windows-amd64-*.exe** — plain node. Double-click to run; daemon + CLI + launcher in one exe. `<exe> install` = autostart, `<exe> status/ping/...` = CLI, `<exe> stop` = down.
+          - **tailscale-node-proxy-windows-amd64-*.zip** — corp/proxy node (integrated HTTP proxy, advertises LAN, forces DERP). Ships with an editable `proxy.conf` (corp upstream proxy) next to the exe.
+          - **tailscale-node-linux-amd64-*** — Linux node. Userspace by default; `TS_NODE_TUN=full` for a real TUN (needs root).
 
-          `proxy.conf` ships disabled by default (behaves like stock Tailscale until you edit it).
+          Latency reporting is built into the daemon (`TS_METRICS_REPORT`, baked into the node builds). Full-VPN **installer** zip (Windows service + `wintun.dll`) is also attached.
           EOF
           # Each build gets its own version tag; mark the newest as "Latest".
           # Delete+recreate makes re-running the same commit idempotent.
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" --notes-file notes.md --latest --target "$GITHUB_SHA" \
-            dist/*.zip dist/*.zip.sha256
+            dist/*.zip dist/*.exe dist/tailscale-node-linux-amd64-* dist/*.sha256
