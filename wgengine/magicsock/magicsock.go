@@ -373,6 +373,11 @@ type Conn struct {
 	// active DERP region, updated every derpFastPingInterval by runDerpFastPing.
 	derpPingLatency syncs.Map[int, time.Duration]
 
+	// derpForcedFailSince ghi thời điểm bắt đầu ping-fail LIÊN TỤC của một home
+	// ÉP (assign). Dùng để giữ region ép dính trong derpForcedDeadGrace rồi mới
+	// cho auto-switch. Xoá entry khi ping thành công lại hoặc khi đã dời đi.
+	derpForcedFailSince syncs.Map[int, time.Time]
+
 	// derpRoute contains optional alternate routes to use as an
 	// optimization instead of contacting a peer via their home
 	// DERP connection.  If they sent us a message on a different

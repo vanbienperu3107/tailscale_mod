@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"tailscale.com/tailcfg"
 )
 
 // TestDerpPingOnce validates the DERP fast-ping decision across every outcome:
@@ -99,5 +101,98 @@ func TestDerpFastPingTimeoutPolicy(t *testing.T) {
 	if derpFastPingTimeout <= derpFastPingInterval {
 		t.Fatalf("derpFastPingTimeout(%v) must exceed derpFastPingInterval(%v)",
 			derpFastPingTimeout, derpFastPingInterval)
+	}
+}
+
+func mkDERPMap(scores map[int]float64, regionIDs ...int) *tailcfg.DERPMap {
+	dm := &tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{}}
+	for _, id := range regionIDs {
+		dm.Regions[id] = &tailcfg.DERPRegion{RegionID: id}
+	}
+	if len(scores) > 0 {
+		dm.HomeParams = &tailcfg.DERPHomeParams{RegionScore: scores}
+	}
+	return dm
+}
+
+// TestDerpForcedHomeRegion validates detection of an explicitly-assigned ("ép")
+// home region across every case. The dashboard encodes an assignment by leaving
+// the assigned region at a normal score and penalising all other regions with a
+// huge HomeParams score; the client treats "there is a penalised region AND
+// exactly one non-penalised region" as a hard force. Everything else (no
+// penalties, multiple assigned, maintenance-only, nil/empty) is not a force and
+// falls through to normal auto-selection.
+func TestDerpForcedHomeRegion(t *testing.T) {
+	const pen = 1e33 // union penalty score for a non-assigned region
+
+	tests := []struct {
+		name   string
+		dm     *tailcfg.DERPMap
+		wantID int
+		wantOK bool
+	}{
+		{
+			name:   "assigned: one preferred, others penalised",
+			dm:     mkDERPMap(map[int]float64{1001: 0.0001, 1000: pen, 1003: 1e30, 2000: pen}, 1000, 1001, 1003, 2000),
+			wantID: 1001, wantOK: true,
+		},
+		{
+			name:   "assigned with default-priority home (score omitted == 1)",
+			dm:     mkDERPMap(map[int]float64{2000: pen}, 1001, 2000),
+			wantID: 1001, wantOK: true,
+		},
+		{
+			name:   "unassigned base map (globally tuned, no penalty) is not forced",
+			dm:     mkDERPMap(map[int]float64{1001: 0.0001, 1003: 0.000464}, 1000, 1001, 1003, 2000),
+			wantOK: false,
+		},
+		{
+			name:   "maintenance score is not a penalty",
+			dm:     mkDERPMap(map[int]float64{2000: 9999}, 1001, 2000),
+			wantOK: false,
+		},
+		{
+			name:   "multiple assigned (two non-penalised) is not a single force",
+			dm:     mkDERPMap(map[int]float64{1001: 0.0001, 1003: 0.000464, 2000: pen}, 1001, 1003, 2000),
+			wantOK: false,
+		},
+		{name: "nil map", dm: nil, wantOK: false},
+		{name: "empty regions", dm: &tailcfg.DERPMap{}, wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, ok := derpForcedHomeRegion(tt.dm)
+			if ok != tt.wantOK {
+				t.Fatalf("ok=%v want %v", ok, tt.wantOK)
+			}
+			if ok && id != tt.wantID {
+				t.Fatalf("regionID=%d want %d", id, tt.wantID)
+			}
+		})
+	}
+}
+
+// TestDerpForcedShouldStick validates the "stick to the forced home, then give
+// up after 30s dead" boundary (derpForcedDeadGrace).
+func TestDerpForcedShouldStick(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	cases := []struct {
+		elapsed time.Duration
+		want    bool
+	}{
+		{0, true},
+		{10 * time.Second, true},
+		{derpForcedDeadGrace - time.Second, true},
+		{derpForcedDeadGrace, false},
+		{derpForcedDeadGrace + 10*time.Second, false},
+	}
+	for _, c := range cases {
+		if got := derpForcedShouldStick(base, base.Add(c.elapsed)); got != c.want {
+			t.Fatalf("shouldStick(elapsed=%v)=%v want %v (grace=%v)", c.elapsed, got, c.want, derpForcedDeadGrace)
+		}
+	}
+	if derpForcedDeadGrace != 30*time.Second {
+		t.Fatalf("derpForcedDeadGrace=%v, expected 30s per design", derpForcedDeadGrace)
 	}
 }

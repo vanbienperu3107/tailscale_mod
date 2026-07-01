@@ -726,6 +726,48 @@ func derpPingOnce(ctx context.Context, timeout time.Duration, ping func(context.
 	return time.Since(t0), err
 }
 
+// derpForcedHomeRegion trả về region mà node bị ÉP (assign) dùng làm home, suy
+// từ per-node DERPMap. Quy ước (do dashboard sinh từ derp_node_assignments):
+// region không được gán bị phạt HomeParams score cực lớn (> derpForcedPenaltyScore);
+// region không bị phạt (score bình thường) chính là region được gán. Chỉ coi là
+// ÉP khi CÓ region bị phạt VÀ đúng một region không bị phạt (một home xác định).
+// ok=false nghĩa là node không có assignment tường minh -> dùng auto-select thường.
+func derpForcedHomeRegion(dm *tailcfg.DERPMap) (regionID int, ok bool) {
+	if dm == nil || len(dm.Regions) == 0 {
+		return 0, false
+	}
+	var scores map[int]float64
+	if dm.HomeParams != nil {
+		scores = dm.HomeParams.RegionScore
+	}
+	anyPenalized := false
+	nonPenalizedCount := 0
+	nonPenalizedID := 0
+	for id := range dm.Regions {
+		s := 1.0 // score omitted trong DERPMap == 1.0 (không phạt, không ưu tiên)
+		if v, has := scores[id]; has {
+			s = v
+		}
+		if s > derpForcedPenaltyScore {
+			anyPenalized = true
+		} else {
+			nonPenalizedCount++
+			nonPenalizedID = id
+		}
+	}
+	if anyPenalized && nonPenalizedCount == 1 {
+		return nonPenalizedID, true
+	}
+	return 0, false
+}
+
+// derpForcedShouldStick báo có nên tiếp tục GIỮ DÍNH home ép hay không: đúng khi
+// khoảng thời gian ping-fail liên tục (now - failSince) còn dưới derpForcedDeadGrace.
+// Tách riêng để test được ranh giới "30s chết thì dời bỏ".
+func derpForcedShouldStick(failSince, now time.Time) bool {
+	return now.Sub(failSince) < derpForcedDeadGrace
+}
+
 // runDerpFastPing pings the DERP connection every derpFastPingInterval,
 // measures round-trip latency, and forces a reconnect when no pong arrives
 // within derpFastPingTimeout. Dead nodes are detected within ~5 seconds.
@@ -763,8 +805,36 @@ func (c *Conn) runDerpFastPing(ctx context.Context, regionID int, dc *derphttp.C
 					return
 				}
 				c.logf("magicsock: derp-%d ping failed (%v), closing region and reconnecting", regionID, err)
-				// Kick off a netcheck so maybeSetNearestDERP can pick a healthier
-				// region if one is available in the DERP map.
+
+				// ÉP trước -> auto sau: nếu region này là home ÉP (assign tường
+				// minh), GIỮ DÍNH — reconnect lại chính nó và KHÔNG ReSTUN (để
+				// auto-select không kéo sang region khác), cho tới khi ping fail
+				// LIÊN TỤC quá derpForcedDeadGrace ("30s chết thì dời bỏ").
+				c.mu.Lock()
+				dm := c.derpMap
+				c.mu.Unlock()
+				if forcedID, forced := derpForcedHomeRegion(dm); forced && forcedID == regionID {
+					since, ok := c.derpForcedFailSince.Load(regionID)
+					if !ok {
+						since = time.Now()
+						c.derpForcedFailSince.Store(regionID, since)
+					}
+					if now := time.Now(); derpForcedShouldStick(since, now) {
+						c.logf("magicsock: derp-%d là home ÉP (assign), giữ dính + reconnect (%v/%v)",
+							regionID, now.Sub(since).Round(time.Second), derpForcedDeadGrace)
+						c.mu.Lock()
+						c.closeOrReconnectDERPLocked(regionID, "forced-home-retry")
+						c.logActiveDerpLocked()
+						c.mu.Unlock()
+						return
+					}
+					c.logf("magicsock: derp-%d (home ÉP) chết liên tục > %v -> cho phép auto-switch",
+						regionID, derpForcedDeadGrace)
+					c.derpForcedFailSince.Delete(regionID)
+				}
+
+				// Không ép, HOẶC home ép đã chết quá grace: kick netcheck để
+				// maybeSetNearestDERP chọn region khoẻ hơn rồi reconnect region mới.
 				c.ReSTUN("derp-ping-fail")
 				// Close this region's activeDerp entirely and restart it.
 				// If ReSTUN updates c.myDerp to a different region,
@@ -778,6 +848,8 @@ func (c *Conn) runDerpFastPing(ctx context.Context, regionID int, dc *derphttp.C
 				return
 			}
 
+			// Ping thành công: reset đồng hồ "chết" của home ép (nếu có).
+			c.derpForcedFailSince.Delete(regionID)
 			lastRTT = rtt
 			c.derpPingLatency.Store(regionID, rtt)
 			c.logf("[v1] magicsock: derp-%d ping RTT=%v", regionID, rtt.Round(time.Millisecond))
@@ -1195,4 +1267,17 @@ const (
 	// ưu tiên (vd itop bị đá khỏi vpn4 về vpn2 liên tục). 10s cho đường proxy
 	// đủ slack; node chết thật vẫn phát hiện trong ~10-12s.
 	derpFastPingTimeout = 10 * time.Second
+
+	// derpForcedPenaltyScore: một region có HomeParams score lớn hơn giá trị này
+	// là region BỊ PHẠT trong per-node DERPMap (dashboard sinh từ bảng
+	// derp_node_assignments: region KHÔNG được gán bị phạt score cực lớn ~1e30).
+	// Sự hiện diện của region bị phạt = node có assignment tường minh -> region
+	// không bị phạt chính là home ÉP. Ngưỡng 1e6 nằm trên mọi score hợp lệ
+	// (kể cả maintenance=9999) nên không nhận nhầm.
+	derpForcedPenaltyScore = 1e6
+
+	// derpForcedDeadGrace: home ÉP (assign) được giữ dính; chỉ khi ping fail liên
+	// tục quá khoảng này mới cho phép auto-switch sang region khác ("30s chết thì
+	// dời bỏ"). Trong thời gian này client cứ reconnect lại chính region ép.
+	derpForcedDeadGrace = 30 * time.Second
 )
