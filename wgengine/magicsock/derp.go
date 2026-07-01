@@ -712,6 +712,20 @@ func (c *Conn) runDerpKeepAlive(ctx context.Context, regionID int, dc *derphttp.
 	}
 }
 
+// derpPingOnce sends a single DERP keepalive ping bounded by timeout and returns
+// the round-trip time and any error. A non-nil error — including a context
+// deadline (timeout) — means the node did not answer in time and must be treated
+// as dead. Behaviour is identical to the inline logic it replaces; it is factored
+// out so the timeout policy (see derpFastPingTimeout) can be validated across
+// cases in tests without a live DERP connection.
+func derpPingOnce(ctx context.Context, timeout time.Duration, ping func(context.Context) error) (rtt time.Duration, err error) {
+	pingCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	t0 := time.Now()
+	err = ping(pingCtx)
+	return time.Since(t0), err
+}
+
 // runDerpFastPing pings the DERP connection every derpFastPingInterval,
 // measures round-trip latency, and forces a reconnect when no pong arrives
 // within derpFastPingTimeout. Dead nodes are detected within ~5 seconds.
@@ -742,11 +756,7 @@ func (c *Conn) runDerpFastPing(ctx context.Context, regionID int, dc *derphttp.C
 				c.logf("magicsock: derp-%d latency: %v", regionID, lastRTT.Round(time.Millisecond))
 			}
 		case <-pingTicker.C:
-			pingCtx, cancel := context.WithTimeout(ctx, derpFastPingTimeout)
-			t0 := time.Now()
-			err := dc.Ping(pingCtx)
-			rtt := time.Since(t0)
-			cancel()
+			rtt, err := derpPingOnce(ctx, derpFastPingTimeout, dc.Ping)
 
 			if err != nil {
 				if ctx.Err() != nil {
