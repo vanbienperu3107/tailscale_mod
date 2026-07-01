@@ -65,4 +65,8 @@ while [ "$#" -gt 1 ]; do
 	esac
 done
 
+# Allow callers to append extra -ldflags (e.g. -X main.nodeMode=proxy for the
+# combined single-file node binaries) without losing version stamping.
+ldflags="$ldflags ${EXTRA_LDFLAGS:-}"
+
 exec $go build ${tags:+-tags=$tags} -trimpath -ldflags "$ldflags" "$@"
