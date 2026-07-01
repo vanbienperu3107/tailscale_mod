@@ -66,9 +66,9 @@ jobs:
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
           # Integrated peer-facing features (HTTP proxy + file share).
           go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener'
-          # DERP fast-ping / anti-flapping fix (derpFastPingTimeout 3s->10s):
-          # validate the ping/timeout decision across all cases + guard the value.
-          go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy' ./wgengine/magicsock/
+          # DERP anti-flapping: ping/timeout decision + "forced (assigned) home
+          # sticks, auto-switch only after 30s dead". Validate across all cases.
+          go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
 
       - name: Build Windows binaries (amd64)
         run: |
