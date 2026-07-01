@@ -180,6 +180,11 @@ type proxyStartFunc = func(logf logger.Logf, dialer *tsdial.Dialer)
 
 func main() {
 	envknob.PanicIfAnyEnvCheckedInInit()
+	// Combined single-file "node" launcher (no-op unless built with -ldflags
+	// main.nodeMode set). Must run before the normal daemon/CLI dispatch.
+	if maybeRunNode() {
+		return
+	}
 	if shouldRunCLI() {
 		beCLI()
 		return
