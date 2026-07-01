@@ -70,6 +70,10 @@ jobs:
           # DERP anti-flapping: ping/timeout decision + "forced (assigned) home
           # sticks, auto-switch only after 30s dead". Validate across all cases.
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
+          # Combined single-file node binary (daemon+CLI+launcher in one exe):
+          # verify it compiles for both OSes with the node launcher linked in.
+          GOOS=linux   go build -tags ts_include_cli -ldflags "-X main.nodeMode=proxy" -o /dev/null ./cmd/tailscaled
+          GOOS=windows go build -tags ts_include_cli -ldflags "-X main.nodeMode=proxy" -o /dev/null ./cmd/tailscaled
 
       - name: Build Windows binaries (amd64)
         run: |
