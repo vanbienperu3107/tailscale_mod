@@ -681,6 +681,11 @@ func getLocalBackend(ctx context.Context, logf logger.Logf, logID logid.PublicID
 	if f, ok := hookConfigureWebClient.GetOk(); ok {
 		f(lb)
 	}
+	// Built-in latency reporter (replaces external metrics-report.ps1). No-op
+	// unless TS_METRICS_REPORT is set. See metricsreport.go.
+	if hookStartMetricsReporter != nil {
+		hookStartMetricsReporter(logf, lb)
+	}
 
 	if ns != nil {
 		if err := ns.Start(lb); err != nil {
@@ -694,6 +699,11 @@ func getLocalBackend(ctx context.Context, logf logger.Logf, logID logid.PublicID
 }
 
 var hookConfigureWebClient feature.Hook[func(*ipnlocal.LocalBackend)]
+
+// hookStartMetricsReporter, if non-nil (set by metricsreport.go's init), starts
+// the built-in DERP/latency reporter goroutine using the LocalBackend. It is the
+// in-daemon replacement for the external metrics-report.ps1 helper.
+var hookStartMetricsReporter func(logger.Logf, *ipnlocal.LocalBackend)
 
 // createEngine tries to the wgengine.Engine based on the order of tunnels
 // specified in the command line flags.
