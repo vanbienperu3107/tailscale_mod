@@ -64,8 +64,9 @@ jobs:
           set -eu
           # Gate the release on the tests for the packages this fork modifies.
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
-          # Integrated peer-facing features (HTTP proxy + file share).
-          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener'
+          # Integrated peer-facing features (HTTP proxy + file share) + built-in
+          # metrics reporter (in-daemon replacement for metrics-report.ps1).
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics'
           # DERP anti-flapping: ping/timeout decision + "forced (assigned) home
           # sticks, auto-switch only after 30s dead". Validate across all cases.
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
