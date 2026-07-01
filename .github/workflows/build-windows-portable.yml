@@ -231,4 +231,4 @@ jobs:
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" --notes-file notes.md --latest --target "$GITHUB_SHA" \
-            dist/*.zip dist/*.exe dist/tailscale-node-linux-amd64-* dist/*.sha256
+            dist/*.zip dist/*.exe "dist/tailscale-node-linux-amd64-${{ needs.build.outputs.long }}" dist/*.sha256
