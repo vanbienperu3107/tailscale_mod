@@ -1179,5 +1179,10 @@ const (
 
 	// derpFastPingTimeout is the maximum time to wait for a pong response
 	// before declaring the DERP node dead and forcing a reconnect.
-	derpFastPingTimeout = 3 * time.Second
+	//
+	// Nới 3s -> 10s: node corp không-UDP đi DERP qua HTTP proxy (CONNECT) có
+	// latency/jitter cao; 3s quá gắt -> báo "chết" nhầm -> flapping khỏi relay
+	// ưu tiên (vd itop bị đá khỏi vpn4 về vpn2 liên tục). 10s cho đường proxy
+	// đủ slack; node chết thật vẫn phát hiện trong ~10-12s.
+	derpFastPingTimeout = 10 * time.Second
 )
