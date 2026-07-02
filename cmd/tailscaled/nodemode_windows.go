@@ -19,9 +19,9 @@ func nodeHideChildWindow(c *exec.Cmd) {
 }
 
 // Elevation is handled at launch by the embedded requireAdministrator manifest
-// (see node.manifest / the generated rsrc_windows_amd64.syso), so Windows shows
-// one UAC prompt and runs this process — and its daemon child — elevated. No
-// runtime self-relaunch is needed.
+// (node.manifest, compiled over manifest_windows_amd64.syso in CI), so Windows
+// shows one UAC prompt and runs this process — and its daemon child — elevated.
+// No runtime self-relaunch is needed.
 
 // nodeKillConflicting stops any previously-running tailscaled that still owns
 // the LocalAPI pipe so this node's daemon can bind it. Best-effort. Our own
