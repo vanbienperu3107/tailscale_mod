@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 
@@ -65,6 +66,42 @@ func TestMetricsFirstV4(t *testing.T) {
 	if got := firstV4(nil); got != "" {
 		t.Fatalf("firstV4(nil)=%q want empty", got)
 	}
+}
+
+// TestNodeNetcheckReport validates the daemon reports exactly the ports it was
+// actually launched with (parsed from its own os.Args/env), not a guess.
+func TestNodeNetcheckReport(t *testing.T) {
+	savedMode, savedArgs := nodeMode, os.Args
+	savedRoutes := nodeLANRoutes
+	t.Cleanup(func() { nodeMode, os.Args, nodeLANRoutes = savedMode, savedArgs, savedRoutes })
+
+	t.Run("non-node build reports nothing", func(t *testing.T) {
+		nodeMode = ""
+		if got := nodeNetcheckReport(); got.Mode != "" {
+			t.Fatalf("got Mode=%q, want empty for non-node build", got.Mode)
+		}
+	})
+
+	t.Run("portable/userspace reports socks5 port only", func(t *testing.T) {
+		nodeMode = "portable"
+		os.Args = []string{"tailscaled", "--statedir=x", "--tun=userspace-networking", "--socks5-server=127.0.0.1:7654"}
+		t.Setenv("TS_PEER_HTTP_PROXY", "")
+		got := nodeNetcheckReport()
+		if got.Mode != "portable" || got.PortSocks5 != 7654 || got.PortHTTP != 0 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("proxy mode reports http proxy port + advertised routes", func(t *testing.T) {
+		nodeMode = "proxy"
+		nodeLANRoutes = "10.0.0.0/8"
+		os.Args = []string{"tailscaled", "--tun=tailscale0"} // TUN: no --socks5-server
+		t.Setenv("TS_PEER_HTTP_PROXY", "7655")
+		got := nodeNetcheckReport()
+		if got.Mode != "proxy" || got.PortSocks5 != 0 || got.PortHTTP != 7655 || got.AdvertisedRoutes != "10.0.0.0/8" {
+			t.Fatalf("got %+v", got)
+		}
+	})
 }
 
 func TestMetricsPostReport(t *testing.T) {
