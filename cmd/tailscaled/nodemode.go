@@ -43,6 +43,13 @@ var (
 	// argument: "userspace" (SOCKS5, no driver) or "tun" (real VPN interface).
 	// The wintun-embedded "vpn" build bakes "tun"; others default to userspace.
 	nodeDefaultMode = "userspace"
+	// nodeAcceptRoutes controls whether the node accepts subnet routes advertised
+	// by other nodes (e.g. the itop/proxy node's LAN). ON by default — like the
+	// stock client — so advertised subnets are reachable; the OS keeps the local
+	// /24 more specific than a broad advertised /8, so internet still works.
+	// Override per-machine with `accept_routes = off` in node.conf if a machine's
+	// own network genuinely overlaps an advertised route.
+	nodeAcceptRoutes = true
 )
 
 const (
@@ -196,13 +203,15 @@ func runNodeLauncher(tun bool) {
 	// Bring the node up (retry until the daemon is ready). OIDC login prints a
 	// URL on the console; --unattended keeps it connected across restarts.
 	//
-	// Deliberately NO --accept-routes: the tailnet range (100.64.0.0/10) already
-	// routes through the TUN, so peers are reachable without it. Accepting the
-	// proxy node's advertised 10.0.0.0/8 would install that route in the OS and,
-	// on a machine whose gateway/LAN is in 10.x, blackhole its own internet
-	// (even the control server) — exactly the "can't reach vpn2" failure. Users
-	// who need the corp subnet can opt in later with `<exe> up --accept-routes`.
-	upArgs := []string{"up", "--accept-routes=false", "--login-server=" + nodeLoginServer}
+	// accept-routes ON (default) makes advertised subnets (itop/proxy LAN) usable
+	// like the stock client — the OS keeps the local /24 more specific than a
+	// broad advertised /8, so internet stays up. Set `accept_routes = off` in
+	// node.conf for a machine whose own network truly overlaps an advertised route.
+	acceptFlag := "--accept-routes=false"
+	if nodeAcceptRoutes {
+		acceptFlag = "--accept-routes"
+	}
+	upArgs := []string{"up", acceptFlag, "--login-server=" + nodeLoginServer}
 	if runtime.GOOS == "windows" {
 		upArgs = append(upArgs, "--unattended") // keep connected when logged out
 	}
@@ -348,9 +357,16 @@ func nodeLoadConfig(dir string) {
 				}
 			case "metrics_url", "metrics-url", "metrics":
 				nodeMetricsURL = v // blank disables the reporter
-			case "advertise_routes", "advertise-routes", "routes", "lan_routes":
+			case "advertise_routes", "advertise-routes", "lan_routes":
 				if v != "" {
 					nodeLANRoutes = v
+				}
+			case "accept_routes", "accept-routes":
+				switch strings.ToLower(v) {
+				case "off", "false", "0", "no", "n":
+					nodeAcceptRoutes = false
+				case "on", "true", "1", "yes", "y":
+					nodeAcceptRoutes = true
 				}
 			}
 		}
