@@ -129,6 +129,7 @@ func runNodeLauncher(tun bool) {
 		log.Fatalf("node: cannot find own path: %v", err)
 	}
 	dir := filepath.Dir(exe)
+	nodeLoadConfig(dir) // node.conf next to the exe can override the control host
 	stateDir := filepath.Join(dir, "state")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		log.Fatalf("node: mkdir state: %v", err)
@@ -159,7 +160,13 @@ func runNodeLauncher(tun bool) {
 	// SOCKS5 at nodeSocksAddr, works everywhere); tun=true → a real VPN
 	// interface (Windows: wintun; Linux: kernel TUN, needs root/CAP_NET_ADMIN)
 	// so the OS routes the tailnet and normal `ping`/apps work.
-	dArgs := []string{"--statedir=" + stateDir, "--verbose=1"}
+	//
+	// --no-logs-no-support disables logtail: the node never uploads logs to
+	// log.tailscale.com. Combined with the headscale control server (vpn2), the
+	// node talks only to your own host — no phone-home to tailscale.com. (The
+	// derp*.tailscale.com bootstrap-DNS lines only appear as a fallback when the
+	// OS DNS is down; with normal connectivity they never fire.)
+	dArgs := []string{"--statedir=" + stateDir, "--verbose=1", "--no-logs-no-support"}
 	if tun {
 		dArgs = append(dArgs, "--tun=tailscale0")
 	} else {
@@ -188,7 +195,14 @@ func runNodeLauncher(tun bool) {
 
 	// Bring the node up (retry until the daemon is ready). OIDC login prints a
 	// URL on the console; --unattended keeps it connected across restarts.
-	upArgs := []string{"up", "--accept-routes", "--login-server=" + nodeLoginServer}
+	//
+	// Deliberately NO --accept-routes: the tailnet range (100.64.0.0/10) already
+	// routes through the TUN, so peers are reachable without it. Accepting the
+	// proxy node's advertised 10.0.0.0/8 would install that route in the OS and,
+	// on a machine whose gateway/LAN is in 10.x, blackhole its own internet
+	// (even the control server) — exactly the "can't reach vpn2" failure. Users
+	// who need the corp subnet can opt in later with `<exe> up --accept-routes`.
+	upArgs := []string{"up", "--accept-routes=false", "--login-server=" + nodeLoginServer}
 	if runtime.GOOS == "windows" {
 		upArgs = append(upArgs, "--unattended") // keep connected when logged out
 	}
@@ -300,6 +314,49 @@ func nodeStop() {
 	c.Env = append(os.Environ(), "TS_BE_CLI=1")
 	c.Stdout, c.Stderr = os.Stdout, os.Stderr
 	_ = c.Run()
+}
+
+// nodeLoadConfig reads an optional node.conf next to the exe and overrides the
+// baked control host / metrics URL / advertised routes. Format: simple
+// key=value lines, '#' or ';' comments. Missing file → keep baked defaults, so
+// the single exe still works with nothing alongside it. Recognised keys:
+//
+//	login_server = https://your-host        # headscale control URL
+//	metrics_url  = https://your-host/app    # dashboard base (blank = disable)
+//	advertise_routes = 10.0.0.0/8           # proxy mode only
+func nodeLoadConfig(dir string) {
+	for _, name := range []string{"node.conf", "node.config", "config.txt"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+				continue
+			}
+			k, v, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			k = strings.ToLower(strings.TrimSpace(k))
+			v = strings.Trim(strings.TrimSpace(v), `"'`)
+			switch k {
+			case "login_server", "login-server", "control", "server", "host":
+				if v != "" {
+					nodeLoginServer = v
+				}
+			case "metrics_url", "metrics-url", "metrics":
+				nodeMetricsURL = v // blank disables the reporter
+			case "advertise_routes", "advertise-routes", "routes", "lan_routes":
+				if v != "" {
+					nodeLANRoutes = v
+				}
+			}
+		}
+		log.Printf("node: loaded config %s (control=%s)", name, nodeLoginServer)
+		return
+	}
 }
 
 func nodeFileExists(p string) bool {

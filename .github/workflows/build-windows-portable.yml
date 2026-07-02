@@ -74,6 +74,12 @@ jobs:
           # verify it compiles for both OSes with the node launcher linked in.
           GOOS=linux   go build -tags ts_include_cli -ldflags "-X main.nodeMode=proxy" -o /dev/null ./cmd/tailscaled
           GOOS=windows go build -tags ts_include_cli -ldflags "-X main.nodeMode=proxy" -o /dev/null ./cmd/tailscaled
+          # VPN variant's trimmed feature set: featuretags --remove validates the
+          # dependency graph, then confirm the omit tags actually compile (wintun
+          # embed is exercised by the real build step).
+          OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,drive,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
+          echo "vpn omit tags: $OMIT"
+          GOOS=windows go build -tags "ts_include_cli,${OMIT}" -o /dev/null ./cmd/tailscaled
 
       - name: Build Windows binaries (amd64)
         run: |
@@ -128,15 +134,31 @@ jobs:
           # Also carries the shared install/uninstall verbs. ts_include_cli +
           # ts_node_wintun (no --box, since --box refuses a custom $TAGS). go:embed
           # needs wintun.dll in the package dir at build time.
+          #
+          # Trimmed: drop tailscaled components a headscale node never uses
+          # (SSH server, Taildrop, Taildrive, web client, systray, kube, tpm,
+          # wake-on-lan, QR codes, client auto-update, network lock, app
+          # connectors) for a leaner/faster binary. featuretags --remove validates
+          # dependencies and errors if a removal is unsafe.
+          OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,drive,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
+          echo "vpn omit tags: $OMIT"
           cp build/wintun/wintun.dll cmd/tailscaled/wintun.dll
           EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable -X main.nodeDefaultMode=tun" \
-            TAGS="ts_include_cli,ts_node_wintun" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            TAGS="ts_include_cli,ts_node_wintun,${OMIT}" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
             sh ./build_dist.sh -o "build/node/tailscale-node-vpn.exe" tailscale.com/cmd/tailscaled
 
           # portable (Windows) + linux + vpn: a single self-contained file each.
           cp "build/node/tailscale-node-portable.exe" "dist/tailscale-node-portable-windows-amd64-${ver}.exe"
           cp "build/node/tailscale-node-linux-amd64"   "dist/tailscale-node-linux-amd64-${ver}"
           cp "build/node/tailscale-node-vpn.exe"       "dist/tailscale-node-vpn-windows-amd64-${ver}.exe"
+          # vpn also as a zip bundled with an editable node.conf (control host),
+          # for users who want to point the node at a different host without a
+          # rebuild. The bare exe above still works standalone (baked host).
+          vpn="tailscale-node-vpn-windows-amd64-${ver}"
+          mkdir -p "dist/${vpn}"
+          cp "build/node/tailscale-node-vpn.exe"    "dist/${vpn}/tailscale-node-vpn.exe"
+          cp release/windows-portable/node.conf     "dist/${vpn}/node.conf"
+          ( cd dist && zip -rq "${vpn}.zip" "${vpn}" )
           # proxy (Windows): exe + editable proxy.conf (corp upstream proxy config).
           proxy="tailscale-node-proxy-windows-amd64-${ver}"
           mkdir -p "dist/${proxy}"
@@ -293,7 +315,7 @@ jobs:
           Version: ${{ needs.build.outputs.long }} (commit ${{ github.sha }})
 
           Single-file "node" builds — just run the one file (no gost / PAC / .bat):
-          - **tailscale-node-vpn-windows-amd64-*.exe** — dual-mode node with **wintun.dll embedded**. `<exe>` or `<exe> tun`/`vpn` = **real VPN interface** (OS `ping` + all apps route via the tailnet); `<exe> userspace` = SOCKS5 mode. `<exe> install`/`uninstall` = add/remove autostart; `<exe> stop` = down. One file, one UAC.
+          - **tailscale-node-vpn-windows-amd64-*.exe** (or the matching **.zip** with an editable `node.conf`) — dual-mode node with **wintun.dll embedded**. `<exe>` or `<exe> tun`/`vpn` = **real VPN interface** (OS `ping` + all apps route via the tailnet); `<exe> userspace` = SOCKS5 mode. `<exe> install`/`uninstall` = add/remove autostart; `<exe> stop` = down. One file, one UAC. **No phone-home**: logtail disabled (`--no-logs-no-support`) + no `--accept-routes` (won't blackhole a 10.x LAN), so it talks only to your host. Drop a **`node.conf`** next to the exe to point it at a different control host without rebuilding. Trimmed of unused components (SSH/Taildrop/Taildrive/webclient/systray/kube/tpm/…).
           - **tailscale-node-portable-windows-amd64-*.exe** — plain userspace node. Double-click to run; connectivity via `<exe> ping` / SOCKS5 `127.0.0.1:7654`. Same `install`/`uninstall`/`stop`/CLI verbs (no embedded wintun, so no TUN).
           - **tailscale-node-proxy-windows-amd64-*.zip** — corp/proxy node (integrated HTTP proxy, advertises LAN, forces DERP). Ships with an editable `proxy.conf` (corp upstream proxy) next to the exe.
           - **tailscale-node-linux-amd64-*** — Linux node. Userspace by default; `<exe> tun` (or `TS_NODE_TUN=full`) for a real kernel TUN (needs root).
