@@ -80,6 +80,17 @@ func maybeRunNode() bool {
 }
 
 func runNodeLauncher() {
+	// The userspace daemon's LocalAPI named pipe requires Administrator to
+	// create (\\.\pipe\ProtectedPrefix\Administrators\...); without elevation
+	// it fails with "Access is denied" and the node exits immediately. Re-launch
+	// elevated on Windows if needed (no-op / already-root elsewhere).
+	if nodeEnsureElevated() {
+		return // re-launched with admin; this instance exits.
+	}
+	// Free the LocalAPI pipe from any previously-running tailscaled so our
+	// daemon can bind it (Windows only; no-op elsewhere).
+	nodeKillConflicting()
+
 	exe, err := os.Executable()
 	if err != nil {
 		log.Fatalf("node: cannot find own path: %v", err)
