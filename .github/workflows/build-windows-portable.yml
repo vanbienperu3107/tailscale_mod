@@ -99,6 +99,17 @@ jobs:
           ver="${{ steps.ver.outputs.long }}"
           mkdir -p dist build/node
 
+          # Embed a requireAdministrator manifest into the WINDOWS node exes so
+          # double-clicking elevates ONCE (one UAC prompt) and the forked daemon
+          # child inherits admin to create the LocalAPI pipe — no runtime
+          # self-relaunch. go build auto-links rsrc_windows_amd64.syso for
+          # windows/amd64 only: the installer tailscaled (built in the previous
+          # step) is unaffected, and the linux node build ignores it.
+          go run github.com/akavel/rsrc@v0.10.2 \
+            -manifest cmd/tailscaled/node.manifest -arch amd64 \
+            -o cmd/tailscaled/rsrc_windows_amd64.syso
+          ls -la cmd/tailscaled/rsrc_windows_amd64.syso
+
           # --- Combined single-file node binaries (daemon + CLI + launcher) ---
           # --box links the CLI (ts_include_cli) so ONE exe is daemon+CLI; the
           # baked launcher (-X main.nodeMode) makes it self-run. No gost / PAC /
