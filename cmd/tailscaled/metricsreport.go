@@ -19,6 +19,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,14 +76,85 @@ func runMetricsReporter(logf logger.Logf, lb *ipnlocal.LocalBackend, base, secre
 	client := &http.Client{Timeout: metricsHTTPTimeout}
 	t := time.NewTicker(metricsReportInterval)
 	defer t.Stop()
+	// Ports/mode/routes are fixed for the life of the process (baked at build
+	// time or set on the daemon's own command line) — read once, not per tick.
+	nc := nodeNetcheckReport()
 	for {
 		if rep, ok := collectMetricsReport(lb, mac); ok {
 			if err := postMetricsReport(client, base, secret, rep); err != nil {
 				logf("[v1] metricsreport: post failed: %v", err)
 			}
+			if nc.Mode != "" { // only node builds know their own ports; skip otherwise
+				if nc.Client == "" {
+					nc.Client = rep.Hostname
+				}
+				if err := postNetcheckReport(client, base, secret, nc); err != nil {
+					logf("[v1] metricsreport: netcheck post failed: %v", err)
+				}
+			}
 		}
 		<-t.C
 	}
+}
+
+// netcheckReport is what a "node" build (nodeMode != "") tells the dashboard
+// about which ports it actually has open, so users don't have to guess a
+// peer-proxy/SOCKS5 port by trial and error (see cmd/tailscaled/nodemode.go).
+type netcheckReport struct {
+	Client           string `json:"client"`
+	PortSocks5       int    `json:"port_socks5,omitempty"`
+	PortHTTP         int    `json:"port_http,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	AdvertisedRoutes string `json:"advertised_routes,omitempty"`
+}
+
+// nodeNetcheckReport inspects THIS process's own daemon flags/env — the
+// launcher forks the daemon with e.g. --socks5-server=127.0.0.1:7654 and
+// TS_PEER_HTTP_PROXY=7655 — so the reported ports are exactly what is really
+// listening, not a guess. No-op (Mode "") on non-node builds.
+func nodeNetcheckReport() netcheckReport {
+	var r netcheckReport
+	if nodeMode == "" {
+		return r
+	}
+	r.Mode = nodeMode
+	for _, a := range os.Args {
+		if v, ok := strings.CutPrefix(a, "--socks5-server="); ok {
+			if _, portStr, ok := strings.Cut(v, ":"); ok {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					r.PortSocks5 = p
+				}
+			}
+		}
+	}
+	if v := os.Getenv("TS_PEER_HTTP_PROXY"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			r.PortHTTP = p
+			r.AdvertisedRoutes = nodeLANRoutes // only proxy mode sets TS_PEER_HTTP_PROXY
+		}
+	}
+	return r
+}
+
+func postNetcheckReport(client *http.Client, base, secret string, rep netcheckReport) error {
+	body, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/api/client/netcheck", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret != "" {
+		req.Header.Set("X-Metrics-Secret", secret)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // collectMetricsReport builds one report by disco-pinging every peer. Returns
