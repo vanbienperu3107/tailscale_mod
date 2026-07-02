@@ -96,6 +96,17 @@ func collectMetricsReport(lb *ipnlocal.LocalBackend, mac string) (metricsReport,
 		IPv4:     firstV4(st.Self.TailscaleIPs),
 		MAC:      mac,
 	}
+	// Report our own home DERP region first so the dashboard's "DERP đang dùng"
+	// column is populated even when every peer path is direct (no per-peer
+	// derp: sample). st.Self.Relay is the region code (e.g. "vpn2-vn"), "" if
+	// none yet. See dashboard overview: region = first sample with path "derp:".
+	if relay := strings.TrimSpace(st.Self.Relay); relay != "" {
+		rep.Samples = append(rep.Samples, metricSample{
+			Dst:  relay,
+			Path: "derp:" + relay,
+			OK:   true,
+		})
+	}
 	for _, p := range st.Peer {
 		if p == nil {
 			continue

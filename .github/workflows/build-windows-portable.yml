@@ -122,9 +122,21 @@ jobs:
           EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
             sh ./build_dist.sh --box -o "build/node/tailscale-node-linux-amd64" tailscale.com/cmd/tailscaled
 
-          # portable (Windows) + linux: a single self-contained file each.
+          # VPN variant (Windows): dual-mode (userspace default OFF -> baked TUN)
+          # with wintun.dll EMBEDDED so the single exe runs a real VPN interface.
+          # `<exe>`/`<exe> tun`/`<exe> vpn` = TUN; `<exe> userspace` = SOCKS5.
+          # Also carries the shared install/uninstall verbs. ts_include_cli +
+          # ts_node_wintun (no --box, since --box refuses a custom $TAGS). go:embed
+          # needs wintun.dll in the package dir at build time.
+          cp build/wintun/wintun.dll cmd/tailscaled/wintun.dll
+          EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable -X main.nodeDefaultMode=tun" \
+            TAGS="ts_include_cli,ts_node_wintun" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            sh ./build_dist.sh -o "build/node/tailscale-node-vpn.exe" tailscale.com/cmd/tailscaled
+
+          # portable (Windows) + linux + vpn: a single self-contained file each.
           cp "build/node/tailscale-node-portable.exe" "dist/tailscale-node-portable-windows-amd64-${ver}.exe"
           cp "build/node/tailscale-node-linux-amd64"   "dist/tailscale-node-linux-amd64-${ver}"
+          cp "build/node/tailscale-node-vpn.exe"       "dist/tailscale-node-vpn-windows-amd64-${ver}.exe"
           # proxy (Windows): exe + editable proxy.conf (corp upstream proxy config).
           proxy="tailscale-node-proxy-windows-amd64-${ver}"
           mkdir -p "dist/${proxy}"
@@ -281,9 +293,10 @@ jobs:
           Version: ${{ needs.build.outputs.long }} (commit ${{ github.sha }})
 
           Single-file "node" builds — just run the one file (no gost / PAC / .bat):
-          - **tailscale-node-portable-windows-amd64-*.exe** — plain node. Double-click to run; daemon + CLI + launcher in one exe. `<exe> install` = autostart, `<exe> status/ping/...` = CLI, `<exe> stop` = down.
+          - **tailscale-node-vpn-windows-amd64-*.exe** — dual-mode node with **wintun.dll embedded**. `<exe>` or `<exe> tun`/`vpn` = **real VPN interface** (OS `ping` + all apps route via the tailnet); `<exe> userspace` = SOCKS5 mode. `<exe> install`/`uninstall` = add/remove autostart; `<exe> stop` = down. One file, one UAC.
+          - **tailscale-node-portable-windows-amd64-*.exe** — plain userspace node. Double-click to run; connectivity via `<exe> ping` / SOCKS5 `127.0.0.1:7654`. Same `install`/`uninstall`/`stop`/CLI verbs (no embedded wintun, so no TUN).
           - **tailscale-node-proxy-windows-amd64-*.zip** — corp/proxy node (integrated HTTP proxy, advertises LAN, forces DERP). Ships with an editable `proxy.conf` (corp upstream proxy) next to the exe.
-          - **tailscale-node-linux-amd64-*** — Linux node. Userspace by default; `TS_NODE_TUN=full` for a real TUN (needs root).
+          - **tailscale-node-linux-amd64-*** — Linux node. Userspace by default; `<exe> tun` (or `TS_NODE_TUN=full`) for a real kernel TUN (needs root).
 
           Latency reporting is built into the daemon (`TS_METRICS_REPORT`, baked into the node builds). Full-VPN **installer** zip (Windows service + `wintun.dll`) is also attached.
           EOF

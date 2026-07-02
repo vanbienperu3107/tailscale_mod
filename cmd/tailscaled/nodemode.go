@@ -7,10 +7,14 @@
 // main.nodeMode ("proxy" or "portable"), the SAME executable is daemon + CLI +
 // launcher in one file:
 //
-//   <exe>            -> node launcher: start the daemon (this binary, userspace)
-//                       with the baked env, then bring the node up against the
-//                       self-hosted control server. Just double-click to run.
-//   <exe> install    -> register autostart (Stage 3).
+//   <exe>            -> node launcher: start the daemon (this binary) with the
+//                       baked env in the default mode, then bring the node up
+//                       against the self-hosted control server. Double-click to run.
+//   <exe> tun|vpn    -> run as a real VPN interface (OS ping + all apps route
+//                       via the tailnet; Windows needs the embedded wintun).
+//   <exe> userspace  -> run userspace (no driver; use `<exe> ping` / SOCKS5).
+//   <exe> install    -> register autostart.
+//   <exe> uninstall  -> bring the node down and remove autostart.
 //   <exe> stop       -> bring the node down.
 //   <exe> <cli...>    -> pass through to the tailscale CLI (status, ping, ...).
 //
@@ -35,6 +39,10 @@ var (
 	nodeLoginServer = "https://vpn2.hangocthanh.io.vn"  // headscale control
 	nodeMetricsURL  = "https://vpn2.hangocthanh.io.vn/app"
 	nodeLANRoutes   = "10.0.0.0/8" // advertised in proxy mode
+	// nodeDefaultMode is the network mode used when the user passes no mode
+	// argument: "userspace" (SOCKS5, no driver) or "tun" (real VPN interface).
+	// The wintun-embedded "vpn" build bakes "tun"; others default to userspace.
+	nodeDefaultMode = "userspace"
 )
 
 const (
@@ -58,12 +66,23 @@ func maybeRunNode() bool {
 		return false
 	}
 	if len(args) == 0 || args[0] == "run" || args[0] == "node" {
-		runNodeLauncher()
+		runNodeLauncher(nodeWantsTun("")) // default mode (baked / env)
 		return true
 	}
 	switch args[0] {
 	case "install":
 		nodeInstall()
+		return true
+	case "uninstall", "remove":
+		nodeUninstall()
+		return true
+	case "tun", "vpn", "full":
+		// Real VPN interface: OS ping + all apps route via the tailnet.
+		runNodeLauncher(true)
+		return true
+	case "userspace", "user":
+		// No driver: connectivity via `<exe> ping` / SOCKS5 127.0.0.1:7654.
+		runNodeLauncher(false)
 		return true
 	case "stop":
 		// Note: only "stop" — "down" falls through to the CLI below so nodeStop
@@ -79,7 +98,26 @@ func maybeRunNode() bool {
 	return false
 }
 
-func runNodeLauncher() {
+// nodeWantsTun resolves the network mode. explicit is "" for the default
+// invocation (use the baked nodeDefaultMode, overridable by TS_NODE_TUN=full),
+// or a mode word from the command line.
+func nodeWantsTun(explicit string) bool {
+	m := explicit
+	if m == "" {
+		m = nodeDefaultMode
+		if os.Getenv("TS_NODE_TUN") == "full" {
+			m = "tun"
+		}
+	}
+	switch m {
+	case "tun", "full", "vpn":
+		return true
+	default:
+		return false
+	}
+}
+
+func runNodeLauncher(tun bool) {
 	// The Windows node exe carries a requireAdministrator manifest, so Windows
 	// elevates it at launch (one UAC prompt) and the daemon child inherits admin
 	// — needed to create the LocalAPI named pipe. No runtime self-relaunch.
@@ -96,6 +134,14 @@ func runNodeLauncher() {
 		log.Fatalf("node: mkdir state: %v", err)
 	}
 
+	// TUN mode on Windows needs wintun.dll next to the exe. The "vpn" build
+	// embeds it (extracted here); other builds error out with a clear message.
+	if tun && runtime.GOOS == "windows" {
+		if err := nodeEnsureWintun(dir); err != nil {
+			log.Fatalf("node: TUN mode needs wintun.dll: %v", err)
+		}
+	}
+
 	// Daemon environment (baked per variant).
 	env := append(os.Environ(), "TS_METRICS_REPORT="+nodeMetricsURL)
 	if nodeMode == "proxy" {
@@ -109,14 +155,19 @@ func runNodeLauncher() {
 		}
 	}
 
-	// Start the daemon: this same binary. TUN mode: userspace by default (no
-	// root, works everywhere); TS_NODE_TUN=full uses a real TUN interface
-	// (Linux, needs root/CAP_NET_ADMIN — a real VPN interface).
+	// Start the daemon: this same binary. tun=false → userspace (no driver,
+	// SOCKS5 at nodeSocksAddr, works everywhere); tun=true → a real VPN
+	// interface (Windows: wintun; Linux: kernel TUN, needs root/CAP_NET_ADMIN)
+	// so the OS routes the tailnet and normal `ping`/apps work.
 	dArgs := []string{"--statedir=" + stateDir, "--verbose=1"}
-	if os.Getenv("TS_NODE_TUN") == "full" {
+	if tun {
 		dArgs = append(dArgs, "--tun=tailscale0")
 	} else {
 		dArgs = append(dArgs, "--tun=userspace-networking", "--socks5-server="+nodeSocksAddr)
+	}
+	modeName := "userspace"
+	if tun {
+		modeName = "tun"
 	}
 	d := exec.Command(exe, dArgs...)
 	d.Env = env
@@ -133,7 +184,7 @@ func runNodeLauncher() {
 	if err := d.Start(); err != nil {
 		log.Fatalf("node: start daemon: %v", err)
 	}
-	log.Printf("node[%s]: daemon started (pid %d); bringing up against %s", nodeMode, d.Process.Pid, nodeLoginServer)
+	log.Printf("node[%s/%s]: daemon started (pid %d); bringing up against %s", nodeMode, modeName, d.Process.Pid, nodeLoginServer)
 
 	// Bring the node up (retry until the daemon is ready). OIDC login prints a
 	// URL on the console; --unattended keeps it connected across restarts.
@@ -207,6 +258,39 @@ func nodeInstall() {
 	default:
 		log.Printf("node: autostart not supported on %s; schedule the exe at boot yourself.", runtime.GOOS)
 	}
+}
+
+// nodeUninstall reverses nodeInstall: brings the node down and removes the
+// autostart entry. Node state (login/keys under <exe>/state) is left in place;
+// delete that folder to fully wipe. Best-effort — missing entries are ignored.
+func nodeUninstall() {
+	nodeStop() // bring the node down first (best-effort)
+	switch runtime.GOOS {
+	case "windows":
+		c := exec.Command("schtasks", "/Delete", "/TN", "TailscaleNode", "/F")
+		c.Stdout, c.Stderr = os.Stdout, os.Stderr
+		if err := c.Run(); err != nil {
+			log.Printf("node: no autostart task to remove (or delete failed: %v).", err)
+		} else {
+			log.Printf("node: autostart removed (Task Scheduler task 'TailscaleNode' deleted).")
+		}
+		// Best-effort: stop any daemon still holding the LocalAPI pipe.
+		nodeKillConflicting()
+	case "linux":
+		_ = exec.Command("systemctl", "--user", "disable", "--now", "tailscale-node.service").Run()
+		home, _ := os.UserHomeDir()
+		path := filepath.Join(home, ".config", "systemd", "user", "tailscale-node.service")
+		if err := os.Remove(path); err != nil {
+			log.Printf("node: no unit file to remove (or remove failed: %v).", err)
+		} else {
+			log.Printf("node: autostart removed (systemd --user unit deleted).")
+		}
+		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	default:
+		log.Printf("node: nothing to uninstall on %s.", runtime.GOOS)
+	}
+	exe, _ := os.Executable()
+	log.Printf("node: uninstalled. State kept at %s; delete it to fully reset.", filepath.Join(filepath.Dir(exe), "state"))
 }
 
 // nodeStop brings the node down via the built-in CLI.
