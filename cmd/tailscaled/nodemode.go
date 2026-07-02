@@ -80,15 +80,10 @@ func maybeRunNode() bool {
 }
 
 func runNodeLauncher() {
-	// The userspace daemon's LocalAPI named pipe requires Administrator to
-	// create (\\.\pipe\ProtectedPrefix\Administrators\...); without elevation
-	// it fails with "Access is denied" and the node exits immediately. Re-launch
-	// elevated on Windows if needed (no-op / already-root elsewhere).
-	if nodeEnsureElevated() {
-		return // re-launched with admin; this instance exits.
-	}
-	// Free the LocalAPI pipe from any previously-running tailscaled so our
-	// daemon can bind it (Windows only; no-op elsewhere).
+	// The Windows node exe carries a requireAdministrator manifest, so Windows
+	// elevates it at launch (one UAC prompt) and the daemon child inherits admin
+	// — needed to create the LocalAPI named pipe. No runtime self-relaunch.
+	// Free the pipe from any previously-running tailscaled first (Windows only).
 	nodeKillConflicting()
 
 	exe, err := os.Executable()
