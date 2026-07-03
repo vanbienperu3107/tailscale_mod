@@ -24,7 +24,9 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -234,6 +236,13 @@ func runNodeLauncher(tun bool) {
 		log.Printf("node: connected.")
 	}
 
+	// Poll the dashboard for runtime overrides (advertise_routes) + "Reload"
+	// requests from the CMS, so an admin change takes effect without a node
+	// restart. Only meaningful for the proxy variant (advertise-routes is a
+	// no-op elsewhere), but harmless to run always — keeps "Reload" working
+	// for future fields too.
+	go nodeRuntimePollLoop(exe, nodeLANRoutes)
+
 	// Keep the launcher alive holding the daemon; exiting would leave the daemon
 	// orphaned but running — waiting keeps logs and lifecycle together.
 	if err := d.Wait(); err != nil {
@@ -378,4 +387,96 @@ func nodeLoadConfig(dir string) {
 func nodeFileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && !fi.IsDir()
+}
+
+const nodeRuntimePollInterval = 20 * time.Second
+
+// nodeRuntimeResponse is the subset of GET /api/client/runtime this launcher
+// acts on. advertise_routes lets the CMS change a proxy node's advertised LAN
+// without a rebuild/restart; reload_at is bumped by the dashboard's "Reload"
+// button to force a re-apply even when advertise_routes itself is unchanged.
+type nodeRuntimeResponse struct {
+	AdvertiseRoutes string `json:"advertise_routes"`
+	ReloadAt        string `json:"reload_at"`
+}
+
+// nodeRuntimePollLoop polls the dashboard for runtime overrides and applies
+// changes live via `<exe> set --advertise-routes=...` — no daemon/launcher
+// restart needed. Fail-open: a dashboard that is down or unreachable just
+// means the node keeps running with whatever it already applied; the loop
+// quietly retries next tick instead of logging on every failure.
+func nodeRuntimePollLoop(exe, initialRoutes string) {
+	if nodeMetricsURL == "" {
+		return
+	}
+	mac := primaryMAC()
+	if mac == "" {
+		return
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	lastRoutes := initialRoutes
+	lastReloadAt := ""
+
+	t := time.NewTicker(nodeRuntimePollInterval)
+	defer t.Stop()
+	for {
+		<-t.C
+		resp, ok := nodeFetchRuntime(client, mac)
+		if !ok {
+			continue
+		}
+		if !nodeShouldReapply(resp, lastRoutes, lastReloadAt) {
+			continue
+		}
+		if err := nodeApplyAdvertiseRoutes(exe, resp.AdvertiseRoutes); err != nil {
+			log.Printf("node: runtime reload: apply advertise-routes failed: %v", err)
+			continue
+		}
+		log.Printf("node: runtime reload: advertise-routes=%q applied", resp.AdvertiseRoutes)
+		lastRoutes = resp.AdvertiseRoutes
+		lastReloadAt = resp.ReloadAt
+	}
+}
+
+// nodeShouldReapply decides whether a poll result warrants re-applying
+// config: either advertise_routes actually changed, or the dashboard's
+// "Reload" button bumped reload_at to a value we haven't acted on yet (an
+// explicit force, even when advertise_routes itself is unchanged). Pure —
+// unit-tested without a network.
+func nodeShouldReapply(resp nodeRuntimeResponse, lastRoutes, lastReloadAt string) bool {
+	changed := resp.AdvertiseRoutes != lastRoutes
+	reloaded := resp.ReloadAt != "" && resp.ReloadAt != lastReloadAt
+	return changed || reloaded
+}
+
+func nodeFetchRuntime(client *http.Client, mac string) (nodeRuntimeResponse, bool) {
+	url := nodeMetricsURL + "/api/client/runtime?mac=" + mac
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nodeRuntimeResponse{}, false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nodeRuntimeResponse{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nodeRuntimeResponse{}, false
+	}
+	var out nodeRuntimeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nodeRuntimeResponse{}, false
+	}
+	return out, true
+}
+
+// nodeApplyAdvertiseRoutes changes the running node's advertised routes
+// without a full `up`/restart. Proxy variant only — a no-op empty value on
+// other variants is harmless (they never advertise routes anyway).
+func nodeApplyAdvertiseRoutes(exe, routes string) error {
+	c := exec.Command(exe, "set", "--advertise-routes="+routes)
+	c.Env = append(os.Environ(), "TS_BE_CLI=1")
+	c.Stdout, c.Stderr = os.Stdout, os.Stderr
+	return c.Run()
 }
