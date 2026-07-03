@@ -131,6 +131,19 @@ func pingRegionOnce(logf logger.Logf, netMon *netmon.Monitor, regionID int, regi
 	if err := dc.Connect(ctx); err != nil {
 		return s // OK stays false
 	}
+
+	// Ping() only resolves the pong if something is concurrently calling
+	// Recv/RecvDetail (see derphttp_client.go docs on Client.Ping) — run that
+	// loop in the background for the lifetime of this ping, stopped by
+	// dc.Close() (deferred above) once we return.
+	go func() {
+		for {
+			if _, _, err := dc.RecvDetail(); err != nil {
+				return
+			}
+		}
+	}()
+
 	start := time.Now()
 	if err := dc.Ping(ctx); err != nil {
 		return s
