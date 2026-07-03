@@ -691,6 +691,15 @@ func getLocalBackend(ctx context.Context, logf logger.Logf, logID logid.PublicID
 	if hookStartMetricsReporter != nil {
 		hookStartMetricsReporter(logf, lb)
 	}
+	// Home-DERP + DERP-ping reporters (homederpreport.go / derppingreport.go).
+	// No-op unless TS_HOMEDERP_REPORT/TS_DERPPING_REPORT (or TS_METRICS_REPORT
+	// as a shared fallback base URL) is set.
+	if hookStartHomeDerpReporter != nil {
+		hookStartHomeDerpReporter(logf, lb)
+	}
+	if hookStartDerpPingReporter != nil {
+		hookStartDerpPingReporter(logf, lb)
+	}
 
 	if ns != nil {
 		if err := ns.Start(lb); err != nil {
@@ -709,6 +718,14 @@ var hookConfigureWebClient feature.Hook[func(*ipnlocal.LocalBackend)]
 // the built-in DERP/latency reporter goroutine using the LocalBackend. It is the
 // in-daemon replacement for the external metrics-report.ps1 helper.
 var hookStartMetricsReporter func(logger.Logf, *ipnlocal.LocalBackend)
+
+// hookStartHomeDerpReporter, if non-nil (set by homederpreport.go's init),
+// starts the built-in home-DERP reporter goroutine.
+var hookStartHomeDerpReporter func(logger.Logf, *ipnlocal.LocalBackend)
+
+// hookStartDerpPingReporter, if non-nil (set by derppingreport.go's init),
+// starts the built-in DERP-ping reporter goroutine.
+var hookStartDerpPingReporter func(logger.Logf, *ipnlocal.LocalBackend)
 
 // createEngine tries to the wgengine.Engine based on the order of tunnels
 // specified in the command line flags.
