@@ -24,7 +24,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -243,6 +246,14 @@ func runNodeLauncher(tun bool) {
 	// for future fields too.
 	go nodeRuntimePollLoop(exe, nodeLANRoutes)
 
+	// Report (mac, hostname, nodeKey) to the dashboard once so it can assign a
+	// stable "canonical name" per physical MAC and auto-rename this node back
+	// to it if the OS hostname changed (reinstall/rename) — instead of
+	// node-dedup's old (user, hostname)-text matching that instead treated the
+	// new hostname as a brand new device. Fire-and-forget: failure just means
+	// no dedup-by-MAC for this boot, node keeps working either way.
+	go nodeRegisterDeviceIdentity(exe)
+
 	// Keep the launcher alive holding the daemon; exiting would leave the daemon
 	// orphaned but running — waiting keeps logs and lifecycle together.
 	if err := d.Wait(); err != nil {
@@ -403,28 +414,48 @@ type nodeRuntimeResponse struct {
 // nodeRuntimePollLoop polls the dashboard for runtime overrides and applies
 // changes live via `<exe> set --advertise-routes=...` — no daemon/launcher
 // restart needed. Fail-open: a dashboard that is down or unreachable just
-// means the node keeps running with whatever it already applied; the loop
-// quietly retries next tick instead of logging on every failure.
+// means the node keeps running with whatever it already applied. Failures are
+// NOT silent, though — logged once immediately and then rate-limited (1, 5,
+// 20, 100, ... consecutive failures), so "poll never succeeds" (e.g. wrong
+// URL, 401 from a configured dashboard secret) is diagnosable from the log
+// without spamming it every 20s.
 func nodeRuntimePollLoop(exe, initialRoutes string) {
 	if nodeMetricsURL == "" {
+		log.Printf("node: runtime poll: disabled (no dashboard URL baked in)")
 		return
 	}
 	mac := primaryMAC()
 	if mac == "" {
+		log.Printf("node: runtime poll: disabled (could not determine primary MAC)")
 		return
 	}
+	log.Printf("node: runtime poll: starting (dashboard=%s mac=%s, every %s)", nodeMetricsURL, mac, nodeRuntimePollInterval)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	lastRoutes := initialRoutes
 	lastReloadAt := ""
+	consecutiveFails := 0
+	loggedFirstSuccess := false
 
 	t := time.NewTicker(nodeRuntimePollInterval)
 	defer t.Stop()
 	for {
 		<-t.C
-		resp, ok := nodeFetchRuntime(client, mac)
-		if !ok {
+		resp, err := nodeFetchRuntime(client, mac)
+		if err != nil {
+			consecutiveFails++
+			if consecutiveFails == 1 || consecutiveFails == 5 || consecutiveFails%20 == 0 {
+				log.Printf("node: runtime poll: failed (%d in a row): %v", consecutiveFails, err)
+			}
 			continue
+		}
+		if consecutiveFails > 0 {
+			log.Printf("node: runtime poll: recovered after %d failed attempts", consecutiveFails)
+		}
+		consecutiveFails = 0
+		if !loggedFirstSuccess {
+			log.Printf("node: runtime poll: dashboard reachable (advertise_routes=%q)", resp.AdvertiseRoutes)
+			loggedFirstSuccess = true
 		}
 		if !nodeShouldReapply(resp, lastRoutes, lastReloadAt) {
 			continue
@@ -450,25 +481,26 @@ func nodeShouldReapply(resp nodeRuntimeResponse, lastRoutes, lastReloadAt string
 	return changed || reloaded
 }
 
-func nodeFetchRuntime(client *http.Client, mac string) (nodeRuntimeResponse, bool) {
+func nodeFetchRuntime(client *http.Client, mac string) (nodeRuntimeResponse, error) {
 	url := nodeMetricsURL + "/api/client/runtime?mac=" + mac
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nodeRuntimeResponse{}, false
+		return nodeRuntimeResponse{}, fmt.Errorf("build request: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nodeRuntimeResponse{}, false
+		return nodeRuntimeResponse{}, fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nodeRuntimeResponse{}, false
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nodeRuntimeResponse{}, fmt.Errorf("status %d from %s: %s", resp.StatusCode, url, string(body))
 	}
 	var out nodeRuntimeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nodeRuntimeResponse{}, false
+		return nodeRuntimeResponse{}, fmt.Errorf("decode response: %w", err)
 	}
-	return out, true
+	return out, nil
 }
 
 // nodeApplyAdvertiseRoutes changes the running node's advertised routes
@@ -479,4 +511,91 @@ func nodeApplyAdvertiseRoutes(exe, routes string) error {
 	c.Env = append(os.Environ(), "TS_BE_CLI=1")
 	c.Stdout, c.Stderr = os.Stdout, os.Stderr
 	return c.Run()
+}
+
+// nodeStatusSelf is the subset of `tailscale status --json` this launcher
+// reads to learn its own NodeKey once `up` has completed.
+type nodeStatusSelf struct {
+	Self struct {
+		PublicKey string `json:"PublicKey"`
+	} `json:"Self"`
+}
+
+// nodeOwnNodeKey shells out to `<exe> status --json` and returns Self.PublicKey.
+// Retries briefly because the daemon may not have a NodeKey published in the
+// first second or two right after `up` returns.
+func nodeOwnNodeKey(exe string) (string, error) {
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		c := exec.Command(exe, "status", "--json")
+		c.Env = append(os.Environ(), "TS_BE_CLI=1")
+		out, err := c.Output()
+		if err != nil {
+			lastErr = fmt.Errorf("status --json: %w", err)
+			continue
+		}
+		var st nodeStatusSelf
+		if err := json.Unmarshal(out, &st); err != nil {
+			lastErr = fmt.Errorf("decode status: %w", err)
+			continue
+		}
+		if st.Self.PublicKey != "" {
+			return st.Self.PublicKey, nil
+		}
+		lastErr = fmt.Errorf("empty Self.PublicKey")
+	}
+	return "", lastErr
+}
+
+// nodeRegisterDeviceIdentity reports (mac, hostname, nodeKey) to the dashboard
+// once per launcher run so it can dedup/rename by stable MAC instead of the
+// legacy (user, hostname) text match. Best-effort/fire-and-forget: logged on
+// failure but never blocks or retries the node's own connectivity.
+func nodeRegisterDeviceIdentity(exe string) {
+	if nodeMetricsURL == "" {
+		return
+	}
+	mac := primaryMAC()
+	if mac == "" {
+		log.Printf("node: device-register: skipped (could not determine primary MAC)")
+		return
+	}
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		log.Printf("node: device-register: skipped (could not determine hostname: %v)", err)
+		return
+	}
+	nodeKey, err := nodeOwnNodeKey(exe)
+	if err != nil {
+		log.Printf("node: device-register: could not determine node key: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"mac":      mac,
+		"hostname": hostname,
+		"node_key": nodeKey,
+	})
+	url := nodeMetricsURL + "/api/internal/device-register"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("node: device-register: build request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("node: device-register: request failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		log.Printf("node: device-register: status %d from %s: %s", resp.StatusCode, url, string(respBody))
+		return
+	}
+	log.Printf("node: device-register: reported mac=%s hostname=%s", mac, hostname)
 }
