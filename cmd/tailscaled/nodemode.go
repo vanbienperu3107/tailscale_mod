@@ -36,6 +36,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"tailscale.com/hostinfo"
+	"tailscale.com/tailcfg"
 )
 
 // Set at build time via -ldflags "-X main.nodeMode=proxy" etc.
@@ -63,6 +66,27 @@ const (
 	nodeDERPKeepSec = "25"
 	nodeUpRetries   = 15
 )
+
+// Report this node's primary MAC via Hostinfo.WoLMACs so headscale can, at
+// registration time, look up a reserved/historical tailnet IP for this
+// hardware (see CMS GET /api/internal/reserved-ip) — nodeKey/MachineKey
+// change on every reinstall, MAC does not. WoLMACs is a real upstream
+// tailcfg field (Wake-on-LAN targets) that headscale never reads; reusing it
+// avoids forking tailcfg.Hostinfo itself, which would force headscale's
+// go.mod to replace its pinned upstream tailscale.com dependency — a much
+// bigger, riskier change. Gated on nodeMode != "" (node-launcher builds
+// only) — a normal/default tailscaled build never sets this, so a stock
+// client talking to the same headscale is completely unaffected.
+func init() {
+	hostinfo.RegisterHostinfoNewHook(func(hi *tailcfg.Hostinfo) {
+		if nodeMode == "" {
+			return
+		}
+		if mac := primaryMAC(); mac != "" {
+			hi.WoLMACs = []string{mac}
+		}
+	})
+}
 
 // maybeRunNode handles the node-launcher subcommands for node-mode builds.
 // Returns true if it handled the invocation (caller should return).
@@ -514,17 +538,20 @@ func nodeApplyAdvertiseRoutes(exe, routes string) error {
 }
 
 // nodeStatusSelf is the subset of `tailscale status --json` this launcher
-// reads to learn its own NodeKey once `up` has completed.
+// reads to learn its own NodeKey + current tailnet IPv4 once `up` has
+// completed.
 type nodeStatusSelf struct {
 	Self struct {
-		PublicKey string `json:"PublicKey"`
+		PublicKey    string   `json:"PublicKey"`
+		TailscaleIPs []string `json:"TailscaleIPs"`
 	} `json:"Self"`
 }
 
-// nodeOwnNodeKey shells out to `<exe> status --json` and returns Self.PublicKey.
-// Retries briefly because the daemon may not have a NodeKey published in the
-// first second or two right after `up` returns.
-func nodeOwnNodeKey(exe string) (string, error) {
+// nodeOwnStatus shells out to `<exe> status --json` and returns
+// (Self.PublicKey, first IPv4 in Self.TailscaleIPs). Retries briefly because
+// the daemon may not have these published in the first second or two right
+// after `up` returns.
+func nodeOwnStatus(exe string) (nodeKey, ipv4 string, err error) {
 	var lastErr error
 	for i := 0; i < 5; i++ {
 		if i > 0 {
@@ -532,22 +559,29 @@ func nodeOwnNodeKey(exe string) (string, error) {
 		}
 		c := exec.Command(exe, "status", "--json")
 		c.Env = append(os.Environ(), "TS_BE_CLI=1")
-		out, err := c.Output()
-		if err != nil {
-			lastErr = fmt.Errorf("status --json: %w", err)
+		out, cmdErr := c.Output()
+		if cmdErr != nil {
+			lastErr = fmt.Errorf("status --json: %w", cmdErr)
 			continue
 		}
 		var st nodeStatusSelf
-		if err := json.Unmarshal(out, &st); err != nil {
-			lastErr = fmt.Errorf("decode status: %w", err)
+		if decodeErr := json.Unmarshal(out, &st); decodeErr != nil {
+			lastErr = fmt.Errorf("decode status: %w", decodeErr)
 			continue
 		}
 		if st.Self.PublicKey != "" {
-			return st.Self.PublicKey, nil
+			var ip string
+			for _, a := range st.Self.TailscaleIPs {
+				if !strings.Contains(a, ":") { // skip IPv6
+					ip = a
+					break
+				}
+			}
+			return st.Self.PublicKey, ip, nil
 		}
 		lastErr = fmt.Errorf("empty Self.PublicKey")
 	}
-	return "", lastErr
+	return "", "", lastErr
 }
 
 // nodeRegisterDeviceIdentity reports (mac, hostname, nodeKey) to the dashboard
@@ -568,7 +602,7 @@ func nodeRegisterDeviceIdentity(exe string) {
 		log.Printf("node: device-register: skipped (could not determine hostname: %v)", err)
 		return
 	}
-	nodeKey, err := nodeOwnNodeKey(exe)
+	nodeKey, ipv4, err := nodeOwnStatus(exe)
 	if err != nil {
 		log.Printf("node: device-register: could not determine node key: %v", err)
 	}
@@ -577,6 +611,7 @@ func nodeRegisterDeviceIdentity(exe string) {
 		"mac":      mac,
 		"hostname": hostname,
 		"node_key": nodeKey,
+		"ipv4":     ipv4,
 	})
 	url := nodeMetricsURL + "/api/internal/device-register"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
