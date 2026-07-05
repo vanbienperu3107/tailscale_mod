@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Built-in DERP-ping reporter — every TS_DERPPING_REPORT_INTERVAL (default
-// 30s), this node pings every DERP region in its current DERPMap (fresh,
-// standalone derphttp connections — independent of magicsock's own active
-// DERP connections) and POSTs the RTT/ok per region to
-// <base>/api/telemetry/derp-ping.
+// 30s), this node pings every DERP region (fresh, standalone derphttp
+// connections — independent of magicsock's own active DERP connections) and
+// POSTs the RTT/ok per region to <base>/api/telemetry/derp-ping.
+//
+// Region set = union of this node's own DERPMap AND the full base DERPMap
+// fetched from <base>/derpmap.json. The union is what lets a node ping regions
+// that are NOT in its own map — e.g. a node locked (exclusive) to a single
+// region still has only that one region in its NetMap, but we want full
+// monitoring coverage across every region. If the base map can't be fetched we
+// fall back to the node's own map (no regression).
 
 package main
 
@@ -13,6 +19,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -80,16 +88,70 @@ func runDerpPingReporter(logf logger.Logf, lb *ipnlocal.LocalBackend, base, secr
 	t := time.NewTicker(derpPingReportInterval)
 	defer t.Stop()
 	for {
-		nm := lb.NetMap()
-		if nm != nil && nm.DERPMap != nil {
+		var nodeDM *tailcfg.DERPMap
+		if nm := lb.NetMap(); nm != nil {
+			nodeDM = nm.DERPMap
+		}
+		dm := mergedPingDERPMap(logf, client, base, secret, nodeDM)
+		if dm != nil && len(dm.Regions) > 0 {
 			rep := derpPingReport{Client: mac}
-			rep.Samples = pingAllRegions(logf, netMon, nm.DERPMap)
+			rep.Samples = pingAllRegions(logf, netMon, dm)
 			if err := postDerpPingReport(client, base, secret, rep); err != nil {
 				logf("[v1] derppingreport: post failed: %v", err)
 			}
 		}
 		<-t.C
 	}
+}
+
+// mergedPingDERPMap returns the union of the node's own DERPMap regions and the
+// full base DERPMap (<base>/derpmap.json). Base-map entries win on regionID
+// collision (they carry complete node info). Returns nil if neither source
+// yields any region.
+func mergedPingDERPMap(logf logger.Logf, client *http.Client, base, secret string, nodeDM *tailcfg.DERPMap) *tailcfg.DERPMap {
+	out := &tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{}}
+	if nodeDM != nil {
+		for id, r := range nodeDM.Regions {
+			out.Regions[id] = r
+		}
+	}
+	if full, err := fetchFullDERPMap(client, base, secret); err != nil {
+		logf("[v1] derppingreport: fetch base derpmap failed, using node map only: %v", err)
+	} else if full != nil {
+		for id, r := range full.Regions {
+			out.Regions[id] = r
+		}
+	}
+	if len(out.Regions) == 0 {
+		return nil
+	}
+	return out
+}
+
+// fetchFullDERPMap GETs <base>/derpmap.json (the dashboard's full base map) and
+// decodes it into a tailcfg.DERPMap. The endpoint is public; the secret header
+// is sent when configured (harmless if unused).
+func fetchFullDERPMap(client *http.Client, base, secret string) (*tailcfg.DERPMap, error) {
+	req, err := http.NewRequest(http.MethodGet, base+"/derpmap.json", nil)
+	if err != nil {
+		return nil, err
+	}
+	if secret != "" {
+		req.Header.Set("X-Headscale-Secret", secret)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var dm tailcfg.DERPMap
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&dm); err != nil {
+		return nil, err
+	}
+	return &dm, nil
 }
 
 // pingAllRegions pings every DERP region concurrently using fresh, ephemeral
