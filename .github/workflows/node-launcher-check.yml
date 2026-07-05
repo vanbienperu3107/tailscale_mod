@@ -1,0 +1,56 @@
+name: Node launcher check
+
+# Lightweight build/vet/test gate for the combined single-file node launcher
+# (cmd/tailscaled with -tags ts_include_cli + -ldflags -X main.nodeMode=...).
+# Unlike build-windows-portable.yml, this does NOT run a Windows smoke-test
+# and does NOT publish a release/pre-release — it only verifies the fork's
+# modified packages compile and their unit tests pass. Safe to run on every
+# push/PR to any branch.
+
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch: {}
+
+concurrency:
+  group: node-launcher-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-vet-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet modified packages
+        run: go vet ./cmd/tailscaled/... ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
+
+      - name: Unit tests (modified packages)
+        run: |
+          set -eu
+          go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare'
+          go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
+
+      - name: Compile combined node binary (linux + windows, proxy mode)
+        run: |
+          set -eu
+          GOOS=linux   go build -tags ts_include_cli -ldflags "-X main.nodeMode=proxy" -o /dev/null ./cmd/tailscaled
+          GOOS=windows go build -tags ts_include_cli -ldflags "-X main.nodeMode=proxy" -o /dev/null ./cmd/tailscaled
+
+      - name: Compile vpn variant's trimmed feature set (Windows)
+        run: |
+          set -eu
+          OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
+          echo "vpn omit tags: $OMIT"
+          GOOS=windows go build -tags "ts_include_cli,${OMIT}" -o /dev/null ./cmd/tailscaled
