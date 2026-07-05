@@ -443,9 +443,12 @@ const nodeRuntimePollInterval = 20 * time.Second
 // acts on. advertise_routes lets the CMS change a proxy node's advertised LAN
 // without a rebuild/restart; reload_at is bumped by the dashboard's "Reload"
 // button to force a re-apply even when advertise_routes itself is unchanged.
+// shares/mounts drive the per-PC folder-share feature — see foldershare.go.
 type nodeRuntimeResponse struct {
-	AdvertiseRoutes string `json:"advertise_routes"`
-	ReloadAt        string `json:"reload_at"`
+	AdvertiseRoutes string             `json:"advertise_routes"`
+	ReloadAt        string             `json:"reload_at"`
+	Shares          []nodeShareDesired `json:"shares"`
+	Mounts          []nodeMountDesired `json:"mounts"`
 }
 
 // nodeRuntimePollLoop polls the dashboard for runtime overrides and applies
@@ -494,6 +497,15 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 			log.Printf("node: runtime poll: dashboard reachable (advertise_routes=%q)", resp.AdvertiseRoutes)
 			loggedFirstSuccess = true
 		}
+
+		// Folder-share (Taildrive): reconcile every tick, not gated behind
+		// nodeShouldReapply — these are independently idempotent (each call
+		// re-derives current state and only acts on a diff) and must
+		// self-heal if a share/mount was removed by something other than us.
+		nodeReconcileShares(exe, resp.Shares)
+		nodeReconcileMounts(exe, resp.Mounts)
+		nodeBrowsePoll(client, mac)
+
 		if !nodeShouldReapply(resp, lastRoutes, lastReloadAt) {
 			continue
 		}

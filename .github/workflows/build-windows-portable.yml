@@ -66,7 +66,7 @@ jobs:
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
           # Integrated peer-facing features (HTTP proxy + file share) + built-in
           # metrics reporter (in-daemon replacement for metrics-report.ps1).
-          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply'
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare'
           # DERP anti-flapping: ping/timeout decision + "forced (assigned) home
           # sticks, auto-switch only after 30s dead". Validate across all cases.
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
@@ -77,7 +77,7 @@ jobs:
           # VPN variant's trimmed feature set: featuretags --remove validates the
           # dependency graph, then confirm the omit tags actually compile (wintun
           # embed is exercised by the real build step).
-          OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,drive,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
+          OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
           echo "vpn omit tags: $OMIT"
           GOOS=windows go build -tags "ts_include_cli,${OMIT}" -o /dev/null ./cmd/tailscaled
 
@@ -142,11 +142,12 @@ jobs:
           # needs wintun.dll in the package dir at build time.
           #
           # Trimmed: drop tailscaled components a headscale node never uses
-          # (SSH server, Taildrop, Taildrive, web client, systray, kube, tpm,
-          # wake-on-lan, QR codes, client auto-update, network lock, app
-          # connectors) for a leaner/faster binary. featuretags --remove validates
-          # dependencies and errors if a removal is unsafe.
-          OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,drive,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
+          # (SSH server, Taildrop, web client, systray, kube, tpm, wake-on-lan,
+          # QR codes, client auto-update, network lock, app connectors) for a
+          # leaner/faster binary. featuretags --remove validates dependencies
+          # and errors if a removal is unsafe. Taildrive is KEPT (not omitted)
+          # — the per-PC folder-share feature drives it from the dashboard.
+          OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
           echo "vpn omit tags: $OMIT"
           cp build/wintun/wintun.dll cmd/tailscaled/wintun.dll
           EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable -X main.nodeDefaultMode=tun $upd -X main.nodeVariant=vpn" \
