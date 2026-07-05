@@ -103,6 +103,9 @@ jobs:
         run: |
           set -eu
           ver="${{ steps.ver.outputs.long }}"
+          # Build number tăng đơn điệu theo run — khóa so sánh cho auto-update.
+          # PHẢI khớp dòng `build:` trong notes.md của job release (cùng run_number).
+          build="${{ github.run_number }}"
           mkdir -p dist build/node
 
           # Make the WINDOWS node exes require Administrator so double-clicking
@@ -121,11 +124,14 @@ jobs:
           # --box links the CLI (ts_include_cli) so ONE exe is daemon+CLI; the
           # baked launcher (-X main.nodeMode) makes it self-run. No gost / PAC /
           # .bat / .vbs clutter; metrics is built into the daemon.
+          # Nhúng version/build/variant để auto-update biết binary hiện tại là
+          # gì (variant khớp asset name server tra ở /api/client/latest).
+          upd="-X main.nodeVersion=$ver -X main.nodeBuild=$build"
           for v in proxy portable; do
-            EXTRA_LDFLAGS="-s -w -X main.nodeMode=$v" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            EXTRA_LDFLAGS="-s -w -X main.nodeMode=$v $upd -X main.nodeVariant=$v" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
               sh ./build_dist.sh --box -o "build/node/tailscale-node-$v.exe" tailscale.com/cmd/tailscaled
           done
-          EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+          EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable $upd -X main.nodeVariant=linux-amd64" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
             sh ./build_dist.sh --box -o "build/node/tailscale-node-linux-amd64" tailscale.com/cmd/tailscaled
 
           # VPN variant (Windows): dual-mode (userspace default OFF -> baked TUN)
@@ -143,7 +149,7 @@ jobs:
           OMIT=$(go run ./cmd/featuretags --remove=ssh,taildrop,drive,webclient,systray,kube,tpm,wakeonlan,qrcodes,clientupdate,tailnetlock,appconnectors)
           echo "vpn omit tags: $OMIT"
           cp build/wintun/wintun.dll cmd/tailscaled/wintun.dll
-          EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable -X main.nodeDefaultMode=tun" \
+          EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable -X main.nodeDefaultMode=tun $upd -X main.nodeVariant=vpn" \
             TAGS="ts_include_cli,ts_node_wintun,${OMIT}" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
             sh ./build_dist.sh -o "build/node/tailscale-node-vpn.exe" tailscale.com/cmd/tailscaled
 
@@ -313,6 +319,7 @@ jobs:
           single-file node binary works as CLI and as a userspace daemon.
 
           Version: ${{ needs.build.outputs.long }} (commit ${{ github.sha }})
+          build: ${{ github.run_number }}
 
           Single-file "node" builds — just run the one file (no gost / PAC / .bat):
           - **tailscale-node-vpn-windows-amd64-*.exe** (or the matching **.zip** with an editable `node.conf`) — dual-mode node with **wintun.dll embedded**. `<exe>` or `<exe> tun`/`vpn` = **real VPN interface** (OS `ping` + all apps route via the tailnet); `<exe> userspace` = SOCKS5 mode. `<exe> install`/`uninstall` = add/remove autostart; `<exe> stop` = down. One file, one UAC. **No phone-home**: logtail disabled (`--no-logs-no-support`), so it talks only to your host. Accepts advertised subnet routes (itop/proxy LAN) by default like the stock client — the OS keeps your local /24 more specific than a broad advertised /8, so internet stays up; set `accept_routes = off` in `node.conf` if a machine truly overlaps. Drop a **`node.conf`** next to the exe to change the control host / toggle routes without rebuilding. Trimmed of unused components (SSH/Taildrop/Taildrive/webclient/systray/kube/tpm/…).

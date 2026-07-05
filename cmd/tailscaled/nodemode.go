@@ -166,6 +166,15 @@ func runNodeLauncher(tun bool) {
 	}
 	dir := filepath.Dir(exe)
 	nodeLoadConfig(dir) // node.conf next to the exe can override the control host
+
+	// Auto-update: before starting the daemon, pull a newer/admin-pinned build
+	// (if enabled) and re-exec into it. No-op on non-versioned/dev builds or when
+	// the dashboard has auto-update off; any failure just proceeds with this exe.
+	nodeCleanupOldExe(exe)
+	if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe) {
+		nodeRestartSelf(exe) // does not return
+	}
+
 	stateDir := filepath.Join(dir, "state")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		log.Fatalf("node: mkdir state: %v", err)
@@ -277,6 +286,10 @@ func runNodeLauncher(tun bool) {
 	// new hostname as a brand new device. Fire-and-forget: failure just means
 	// no dedup-by-MAC for this boot, node keeps working either way.
 	go nodeRegisterDeviceIdentity(exe)
+
+	// Periodically self-update in the background (every nodeUpdateCheckInterval);
+	// on a new build it swaps the exe and restarts the launcher.
+	go nodeUpdateLoop(exe)
 
 	// Keep the launcher alive holding the daemon; exiting would leave the daemon
 	// orphaned but running — waiting keeps logs and lifecycle together.
@@ -607,11 +620,20 @@ func nodeRegisterDeviceIdentity(exe string) {
 		log.Printf("node: device-register: could not determine node key: %v", err)
 	}
 
-	body, _ := json.Marshal(map[string]string{
-		"mac":      mac,
-		"hostname": hostname,
-		"node_key": nodeKey,
-		"ipv4":     ipv4,
+	body, _ := json.Marshal(struct {
+		Mac      string `json:"mac"`
+		Hostname string `json:"hostname"`
+		NodeKey  string `json:"node_key"`
+		IPv4     string `json:"ipv4"`
+		Version  string `json:"version,omitempty"`
+		Build    int    `json:"build,omitempty"`
+	}{
+		Mac:      mac,
+		Hostname: hostname,
+		NodeKey:  nodeKey,
+		IPv4:     ipv4,
+		Version:  nodeVersion,
+		Build:    nodeCurrentBuild(),
 	})
 	url := nodeMetricsURL + "/api/internal/device-register"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
