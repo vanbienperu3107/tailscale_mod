@@ -448,7 +448,11 @@ type nodeBrowseEntry struct {
 	IsDir bool   `json:"is_dir"`
 }
 
-const nodeBrowsePollInterval = 3 * time.Second
+// 1s: user feedback after testing at 3s — clicking into a subfolder still
+// felt slow (up to 3s per click, worse than a native file explorer). This is
+// a single lightweight GET, best-effort, in its own goroutine — cheap enough
+// to run this often.
+const nodeBrowsePollInterval = 1 * time.Second
 
 // nodeBrowsePollLoop checks for a pending folder-browse request on its own
 // fast cadence, independent of the 20s runtime poll (nodeRuntimePollLoop).
