@@ -222,6 +222,55 @@ func runNodeLauncher(tun bool) {
 		}
 	}
 
+	// Background pollers: started ONCE, independent of the daemon's own
+	// lifecycle below. They talk to the dashboard over HTTP and drive the
+	// local `<exe>` CLI, which always finds whichever daemon is currently
+	// listening on the LocalAPI socket — they don't need restarting when
+	// nodeRunDaemonSupervised below restarts a crashed daemon.
+	go nodeRuntimePollLoop(exe, nodeLANRoutes)
+	go nodeBrowsePollLoop()
+	go nodeRegisterDeviceIdentity(exe)
+	go nodeUpdateLoop(exe)
+	go nodeUpdateSignalPollLoop(exe)
+
+	nodeRunDaemonSupervised(exe, stateDir, logDir, env, tun)
+}
+
+// nodeRunDaemonSupervised starts the daemon and blocks forever, restarting it
+// with backoff on any unexpected exit instead of letting the whole launcher
+// (and every poller started above) die with it. Before this, a daemon crash
+// — self-update race, transient OS/network issue, anything — silently killed
+// the entire node with nothing left running to notice or recover; an admin
+// had to find the dead process and relaunch it by hand.
+func nodeRunDaemonSupervised(exe, stateDir, logDir string, env []string, tun bool) {
+	backoff := 2 * time.Second
+	const maxBackoff = 30 * time.Second
+	for {
+		start := time.Now()
+		err := nodeRunDaemonOnce(exe, stateDir, logDir, env, tun)
+		ranFor := time.Since(start)
+		if err == nil {
+			log.Printf("node: daemon exited cleanly after %s", ranFor.Round(time.Second))
+		} else {
+			log.Printf("node: daemon exited unexpectedly after %s: %v", ranFor.Round(time.Second), err)
+		}
+		// Ran long enough to be considered healthy → don't let one good run
+		// erase all memory of a bad patch, but also don't let a single early
+		// crash condemn every future restart to the max backoff forever.
+		if ranFor > maxBackoff {
+			backoff = 2 * time.Second
+		}
+		log.Printf("node: restarting daemon in %s…", backoff)
+		time.Sleep(backoff)
+		backoff = min(backoff*2, maxBackoff)
+		nodeKillConflicting() // free the LocalAPI pipe from the dead process first
+	}
+}
+
+// nodeRunDaemonOnce starts one daemon instance, brings it up, and blocks until
+// it exits. Returns the daemon's own exit error (nil on a clean/expected
+// shutdown, e.g. an explicit `<exe> stop` or `down` from outside this process).
+func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) error {
 	// Start the daemon: this same binary. tun=false → userspace (no driver,
 	// SOCKS5 at nodeSocksAddr, works everywhere); tun=true → a real VPN
 	// interface (Windows: wintun; Linux: kernel TUN, needs root/CAP_NET_ADMIN)
@@ -246,7 +295,6 @@ func runNodeLauncher(tun bool) {
 	d.Env = env
 	// Daemon logs to a file so the node can run windowless; the interactive
 	// OIDC login URL still prints to this launcher's console (up child, below).
-	// logDir was already created above, alongside node-launcher.log.
 	if lf, lerr := os.OpenFile(filepath.Join(logDir, "tailscaled.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); lerr == nil {
 		d.Stdout, d.Stderr = lf, lf
 	} else {
@@ -254,7 +302,7 @@ func runNodeLauncher(tun bool) {
 	}
 	nodeHideChildWindow(d)
 	if err := d.Start(); err != nil {
-		log.Fatalf("node: start daemon: %v", err)
+		return fmt.Errorf("start daemon: %w", err)
 	}
 	log.Printf("node[%s/%s]: daemon started (pid %d); bringing up against %s", nodeMode, modeName, d.Process.Pid, nodeLoginServer)
 
@@ -292,40 +340,7 @@ func runNodeLauncher(tun bool) {
 		log.Printf("node: connected.")
 	}
 
-	// Poll the dashboard for runtime overrides (advertise_routes) + "Reload"
-	// requests from the CMS, so an admin change takes effect without a node
-	// restart. Only meaningful for the proxy variant (advertise-routes is a
-	// no-op elsewhere), but harmless to run always — keeps "Reload" working
-	// for future fields too.
-	go nodeRuntimePollLoop(exe, nodeLANRoutes)
-
-	// Folder picker (Taildrive "Duyệt…"): its own fast-cadence loop, separate
-	// from the 20s runtime poll above. Browsing is an interactive admin
-	// action — a click should get a response in a few seconds, not wait for
-	// the next scheduled maintenance tick shared with routes/shares/updates.
-	go nodeBrowsePollLoop()
-
-	// Report (mac, hostname, nodeKey) to the dashboard once so it can assign a
-	// stable "canonical name" per physical MAC and auto-rename this node back
-	// to it if the OS hostname changed (reinstall/rename) — instead of
-	// node-dedup's old (user, hostname)-text matching that instead treated the
-	// new hostname as a brand new device. Fire-and-forget: failure just means
-	// no dedup-by-MAC for this boot, node keeps working either way.
-	go nodeRegisterDeviceIdentity(exe)
-
-	// Periodically self-update in the background (every nodeUpdateCheckInterval);
-	// on a new build it swaps the exe and restarts the launcher.
-	go nodeUpdateLoop(exe)
-
-	// "Cập nhật ngay" (fleet-wide or per-machine) felt in ~3s, not up to 20s —
-	// own fast cadence, separate from the runtime poll below.
-	go nodeUpdateSignalPollLoop(exe)
-
-	// Keep the launcher alive holding the daemon; exiting would leave the daemon
-	// orphaned but running — waiting keeps logs and lifecycle together.
-	if err := d.Wait(); err != nil {
-		log.Printf("node: daemon exited: %v", err)
-	}
+	return d.Wait()
 }
 
 // nodeInstall registers the launcher to run at login/boot.
