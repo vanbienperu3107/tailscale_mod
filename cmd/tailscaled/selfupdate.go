@@ -5,9 +5,10 @@
 //
 // The launcher (runNodeLauncher) owns the on-disk exe and re-execs itself as
 // the daemon, so it is the natural place to self-update: on start and every
-// nodeUpdateCheckInterval it asks the dashboard <base>/api/client/latest whether
-// a newer (or admin-pinned) build exists for this variant, downloads it,
-// verifies sha256, atomically swaps the exe, and restarts.
+// nodeUpdateCheckInterval (1 minute) it asks the dashboard
+// <base>/api/client/latest whether a newer (or admin-pinned) build exists for
+// this variant, downloads it, verifies sha256, atomically swaps the exe, and
+// restarts.
 //
 // Safety:
 //   - Only runs for versioned node builds (nodeVariant + nodeBuild baked by CI).
@@ -45,7 +46,12 @@ var (
 )
 
 const (
-	nodeUpdateCheckInterval = 6 * time.Hour
+	// 1 minute: this is a single lightweight GET /api/client/latest, isolated
+	// in its own goroutine/ticker (nodeUpdateLoop) — it never touches the
+	// heavier routes/shares/mounts reconcile in nodeRuntimePollLoop, so a
+	// short interval doesn't add load there. It only does real work (download
+	// + sha256 verify + swap) on the rare tick where a new build is found.
+	nodeUpdateCheckInterval = 1 * time.Minute
 	nodeUpdateHTTPTimeout   = 90 * time.Second
 )
 
