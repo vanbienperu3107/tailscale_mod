@@ -687,6 +687,7 @@ func nodeRegisterDeviceIdentity(exe string) {
 		IPv4     string `json:"ipv4"`
 		Version  string `json:"version,omitempty"`
 		Build    int    `json:"build,omitempty"`
+		Variant  string `json:"variant,omitempty"`
 	}{
 		Mac:      mac,
 		Hostname: hostname,
@@ -694,6 +695,7 @@ func nodeRegisterDeviceIdentity(exe string) {
 		IPv4:     ipv4,
 		Version:  nodeVersion,
 		Build:    nodeCurrentBuild(),
+		Variant:  nodeVariant,
 	})
 	url := nodeMetricsURL + "/api/internal/device-register"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))

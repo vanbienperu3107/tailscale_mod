@@ -154,10 +154,13 @@ jobs:
             TAGS="ts_include_cli,ts_node_wintun,${OMIT}" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
             sh ./build_dist.sh -o "build/node/tailscale-node-vpn.exe" tailscale.com/cmd/tailscaled
 
-          # portable (Windows) + linux + vpn: a single self-contained file each.
+          # portable (Windows) + linux + vpn + proxy: a single self-contained file
+          # each — required for self-update (checkAndSelfUpdate swaps this exact
+          # exe in place); the zip bundles below are for first-time setup only.
           cp "build/node/tailscale-node-portable.exe" "dist/tailscale-node-portable-windows-amd64-${ver}.exe"
           cp "build/node/tailscale-node-linux-amd64"   "dist/tailscale-node-linux-amd64-${ver}"
           cp "build/node/tailscale-node-vpn.exe"       "dist/tailscale-node-vpn-windows-amd64-${ver}.exe"
+          cp "build/node/tailscale-node-proxy.exe"     "dist/tailscale-node-proxy-windows-amd64-${ver}.exe"
           # vpn also as a zip bundled with an editable node.conf (control host),
           # for users who want to point the node at a different host without a
           # rebuild. The bare exe above still works standalone (baked host).

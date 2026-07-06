@@ -56,10 +56,32 @@ func nodeCurrentBuild() int {
 
 type nodeLatest struct {
 	Enabled bool   `json:"enabled"`
+	Reason  string `json:"reason"` // set when Enabled is false: why (see nodeUpdateReasonText)
 	Build   int    `json:"build"`
 	Version string `json:"version"`
 	URL     string `json:"url"`
 	Sha256  string `json:"sha256"`
+}
+
+// nodeUpdateReasonText turns the dashboard's machine-readable "reason" for
+// enabled:false into the log line an admin can act on — "disabled" and
+// "unsupported_variant" used to print the exact same "toggle it on" message,
+// which sent an admin chasing a setting that was already correct.
+func nodeUpdateReasonText(reason string) string {
+	switch reason {
+	case "disabled":
+		return "auto-update is OFF on dashboard (toggle it on)"
+	case "unsupported_variant":
+		return fmt.Sprintf("dashboard doesn't recognize variant %q (no matching CI asset)", nodeVariant)
+	case "no_release":
+		return "dashboard has no eligible release (none published yet, or the pinned build was deleted)"
+	case "no_asset":
+		return fmt.Sprintf("target release has no asset for variant %q", nodeVariant)
+	case "no_sha256":
+		return "target release is missing a .sha256 file — refusing to update without one"
+	default:
+		return "auto-update is OFF on dashboard (toggle it on)"
+	}
 }
 
 // nodeCleanupOldExe removes the <exe>.old left by a previous update (best-effort;
@@ -82,11 +104,13 @@ func checkAndSelfUpdate(base, secret, exe string) bool {
 		return false
 	}
 	if !latest.Enabled {
-		log.Printf("node: no update — auto-update is OFF on dashboard (toggle it on)")
+		log.Printf("node: no update — %s", nodeUpdateReasonText(latest.Reason))
 		return false
 	}
 	if latest.URL == "" || latest.Sha256 == "" {
-		log.Printf("node: no update — dashboard has no publishable build for variant %q", nodeVariant)
+		// Server contract is that Enabled=true always carries URL+Sha256; reaching
+		// here means a server-side inconsistency, not a normal "disabled" case.
+		log.Printf("node: no update — dashboard reported enabled but no publishable build for variant %q", nodeVariant)
 		return false
 	}
 	if latest.Build == nodeCurrentBuild() {
