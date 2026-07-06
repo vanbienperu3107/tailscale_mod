@@ -167,6 +167,12 @@ func runNodeLauncher(tun bool) {
 	dir := filepath.Dir(exe)
 	nodeLoadConfig(dir) // node.conf next to the exe can override the control host
 
+	// Log the running build so testers can see which version a machine is on
+	// (empty on non-versioned/dev builds).
+	if nodeBuild != "" || nodeVersion != "" {
+		log.Printf("node: running build %s (%s), variant %s", nodeBuild, nodeVersion, nodeVariant)
+	}
+
 	// Auto-update: before starting the daemon, pull a newer/admin-pinned build
 	// (if enabled) and re-exec into it. No-op on non-versioned/dev builds or when
 	// the dashboard has auto-update off; any failure just proceeds with this exe.
