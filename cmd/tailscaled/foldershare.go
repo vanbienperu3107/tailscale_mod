@@ -447,13 +447,38 @@ type nodeBrowseEntry struct {
 	IsDir bool   `json:"is_dir"`
 }
 
+const nodeBrowsePollInterval = 3 * time.Second
+
+// nodeBrowsePollLoop checks for a pending folder-browse request on its own
+// fast cadence, independent of the 20s runtime poll (nodeRuntimePollLoop).
+// Browsing is an interactive admin action — a click on "Duyệt…" needs to
+// feel responsive, not wait up to 20s for the next shared maintenance tick.
+// A short interval also shrinks the window for the dashboard-side staleness
+// check (POST /api/internal/browse-result only accepts a reply matching the
+// latest requested path) to drop a reply because the admin clicked into
+// another subfolder before this node polled again.
+func nodeBrowsePollLoop() {
+	if nodeMetricsURL == "" {
+		return
+	}
+	mac := primaryMAC()
+	if mac == "" {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	t := time.NewTicker(nodeBrowsePollInterval)
+	defer t.Stop()
+	for {
+		<-t.C
+		nodeBrowsePoll(client, mac)
+	}
+}
+
 // nodeBrowsePoll checks whether the dashboard has a pending "list this
 // directory" request for us (admin clicked "Duyệt…" in the folder-share
-// dialog) and, if so, lists it and reports the result back. Runs on the same
-// 20s cadence as the runtime poll — the folder picker is not latency-critical
-// (an admin is choosing a path, not automating something time-sensitive).
-// Fail-open and silent on transport errors: this is best-effort UI sugar, not
-// core connectivity.
+// dialog) and, if so, lists it and reports the result back. Fail-open and
+// silent on transport errors: this is best-effort UI sugar, not core
+// connectivity.
 func nodeBrowsePoll(client *http.Client, mac string) {
 	path, err := nodeFetchBrowseRequest(client, mac)
 	if err != nil || path == "" {
