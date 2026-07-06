@@ -447,8 +447,12 @@ const nodeRuntimePollInterval = 20 * time.Second
 type nodeRuntimeResponse struct {
 	AdvertiseRoutes string             `json:"advertise_routes"`
 	ReloadAt        string             `json:"reload_at"`
-	Shares          []nodeShareDesired `json:"shares"`
-	Mounts          []nodeMountDesired `json:"mounts"`
+	// UpdateCheckAt is bumped by the dashboard "Cập nhật ngay" button; when it
+	// changes to a value we haven't acted on, the launcher runs the self-update
+	// check immediately (instead of waiting for the 6h periodic loop).
+	UpdateCheckAt string             `json:"update_check_at"`
+	Shares        []nodeShareDesired `json:"shares"`
+	Mounts        []nodeMountDesired `json:"mounts"`
 }
 
 // nodeRuntimePollLoop polls the dashboard for runtime overrides and applies
@@ -474,6 +478,8 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	lastRoutes := initialRoutes
 	lastReloadAt := ""
+	lastUpdateCheckAt := ""
+	updateSeen := false // adopt the first-seen value without acting (startup already checked)
 	consecutiveFails := 0
 	loggedFirstSuccess := false
 
@@ -505,6 +511,22 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 		nodeReconcileShares(exe, resp.Shares)
 		nodeReconcileMounts(exe, resp.Mounts)
 		nodeBrowsePoll(client, mac)
+
+		// Update-now push: dashboard "Cập nhật ngay" bumps update_check_at. The
+		// first poll only adopts the current value (the startup path already ran
+		// a check); any later change triggers an immediate self-update check, so
+		// an admin click reaches every client within one poll (≤20s) instead of
+		// waiting up to 6h.
+		if !updateSeen {
+			updateSeen = true
+			lastUpdateCheckAt = resp.UpdateCheckAt
+		} else if resp.UpdateCheckAt != "" && resp.UpdateCheckAt != lastUpdateCheckAt {
+			lastUpdateCheckAt = resp.UpdateCheckAt
+			log.Printf("node: update-now requested by dashboard, checking…")
+			if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe) {
+				nodeRestartSelf(exe) // does not return
+			}
+		}
 
 		if !nodeShouldReapply(resp, lastRoutes, lastReloadAt) {
 			continue
