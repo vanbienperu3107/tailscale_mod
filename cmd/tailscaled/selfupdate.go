@@ -78,14 +78,20 @@ func checkAndSelfUpdate(base, secret, exe string) bool {
 	}
 	latest, err := nodeFetchLatest(base, secret)
 	if err != nil {
-		log.Printf("[v1] node: update check failed: %v", err)
+		log.Printf("node: update check failed: %v", err)
 		return false
 	}
-	if !latest.Enabled || latest.URL == "" || latest.Sha256 == "" {
-		return false // auto-update disabled or no publishable build
+	if !latest.Enabled {
+		log.Printf("node: no update — auto-update is OFF on dashboard (toggle it on)")
+		return false
+	}
+	if latest.URL == "" || latest.Sha256 == "" {
+		log.Printf("node: no update — dashboard has no publishable build for variant %q", nodeVariant)
+		return false
 	}
 	if latest.Build == nodeCurrentBuild() {
-		return false // already on the target build
+		log.Printf("node: already on the latest build %d — nothing to update", latest.Build)
+		return false
 	}
 	log.Printf("node: update available build %d -> %d (%s), downloading…",
 		nodeCurrentBuild(), latest.Build, latest.Version)
