@@ -189,9 +189,10 @@ func runNodeLauncher(tun bool) {
 
 	// Auto-update: before starting the daemon, pull a newer/admin-pinned build
 	// (if enabled) and re-exec into it. No-op on non-versioned/dev builds or when
-	// the dashboard has auto-update off; any failure just proceeds with this exe.
+	// the dashboard has auto-update off (globally or for this machine specifically
+	// — see checkAndSelfUpdate); any failure just proceeds with this exe.
 	nodeCleanupOldExe(exe)
-	if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe) {
+	if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe, primaryMAC()) {
 		nodeRestartSelf(exe) // does not return
 	}
 
@@ -549,7 +550,7 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 		} else if resp.UpdateCheckAt != "" && resp.UpdateCheckAt != lastUpdateCheckAt {
 			lastUpdateCheckAt = resp.UpdateCheckAt
 			log.Printf("node: update-now requested by dashboard, checking…")
-			if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe) {
+			if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe, mac) {
 				nodeRestartSelf(exe) // does not return
 			}
 		}
