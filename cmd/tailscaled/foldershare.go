@@ -475,6 +475,14 @@ func nodeBrowsePollLoop() {
 	}
 }
 
+// nodeBrowseDrivesSentinel is what the dashboard sends as the request path
+// when the admin hasn't typed/picked a starting folder yet (new share, empty
+// localPath). A hardcoded default like "D:\" used to be sent instead — which
+// fails outright on any machine without that exact drive letter (no D:, only
+// C:/E:/...). This can't collide with a real Windows path (":" is only valid
+// right after a single drive letter).
+const nodeBrowseDrivesSentinel = "::drives::"
+
 // nodeBrowsePoll checks whether the dashboard has a pending "list this
 // directory" request for us (admin clicked "Duyệt…" in the folder-share
 // dialog) and, if so, lists it and reports the result back. Fail-open and
@@ -485,7 +493,16 @@ func nodeBrowsePoll(client *http.Client, mac string) {
 	if err != nil || path == "" {
 		return
 	}
-	entries, err := nodeListDir(path)
+	var entries []nodeBrowseEntry
+	if path == nodeBrowseDrivesSentinel {
+		entries = nodeListDrives()
+		log.Printf("node: folder-browse: listed available drives (%d found)", len(entries))
+		if err := nodePostBrowseResult(client, mac, path, entries); err != nil {
+			log.Printf("node: folder-browse: report result failed: %v", err)
+		}
+		return
+	}
+	entries, err = nodeListDir(path)
 	if err != nil {
 		log.Printf("node: folder-browse: list %q failed: %v", path, err)
 		entries = nil // still report back so the admin UI doesn't hang waiting
@@ -537,6 +554,24 @@ func nodeListDir(path string) ([]nodeBrowseEntry, error) {
 		entries = append(entries, nodeBrowseEntry{Name: d.Name(), IsDir: d.IsDir()})
 	}
 	return entries, nil
+}
+
+// nodeListDrives reports the actual drive letters present on this machine —
+// used as the root of the folder picker instead of guessing a hardcoded one
+// ("D:\" used to be sent by the dashboard as the default starting path,
+// which fails outright on any machine without that exact letter). Linux has
+// no drive-letter concept; the dashboard only sends the sentinel on Windows
+// clients (variant-agnostic here, but os.Stat("A:\") etc. simply never
+// matches on Linux, so this safely returns an empty list there too).
+func nodeListDrives() []nodeBrowseEntry {
+	var out []nodeBrowseEntry
+	for l := 'A'; l <= 'Z'; l++ {
+		d := string(l) + ":"
+		if _, err := os.Stat(d + `\`); err == nil {
+			out = append(out, nodeBrowseEntry{Name: d, IsDir: true})
+		}
+	}
+	return out
 }
 
 func nodePostBrowseResult(client *http.Client, mac, path string, entries []nodeBrowseEntry) error {
