@@ -165,6 +165,20 @@ func runNodeLauncher(tun bool) {
 		log.Fatalf("node: cannot find own path: %v", err)
 	}
 	dir := filepath.Dir(exe)
+	logDir := filepath.Join(dir, "state", "logs")
+
+	// This launcher runs unattended via Task Scheduler (nodeInstall), with no
+	// console to see — without this, every "node: ..." line below (self-update,
+	// folder-share, browse-poll, runtime poll) went to a stdout nobody captured.
+	// tailscaled.log next to it is the CHILD daemon's own networking log; this
+	// process never wrote to it. MultiWriter keeps console output too, for
+	// interactive/manual runs.
+	if err := os.MkdirAll(logDir, 0o700); err == nil {
+		if lf, lerr := os.OpenFile(filepath.Join(logDir, "node-launcher.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); lerr == nil {
+			log.SetOutput(io.MultiWriter(os.Stderr, lf))
+		}
+	}
+
 	nodeLoadConfig(dir) // node.conf next to the exe can override the control host
 
 	// Log the running build so testers can see which version a machine is on
@@ -231,8 +245,7 @@ func runNodeLauncher(tun bool) {
 	d.Env = env
 	// Daemon logs to a file so the node can run windowless; the interactive
 	// OIDC login URL still prints to this launcher's console (up child, below).
-	logDir := filepath.Join(stateDir, "logs")
-	_ = os.MkdirAll(logDir, 0o700)
+	// logDir was already created above, alongside node-launcher.log.
 	if lf, lerr := os.OpenFile(filepath.Join(logDir, "tailscaled.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); lerr == nil {
 		d.Stdout, d.Stderr = lf, lf
 	} else {
