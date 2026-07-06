@@ -77,6 +77,8 @@ func nodeUpdateReasonText(reason string) string {
 	switch reason {
 	case "disabled":
 		return "auto-update is OFF on dashboard (toggle it on)"
+	case "disabled_for_device":
+		return "auto-update is OFF for this specific machine (dashboard per-machine override)"
 	case "unsupported_variant":
 		return fmt.Sprintf("dashboard doesn't recognize variant %q (no matching CI asset)", nodeVariant)
 	case "no_release":
@@ -99,12 +101,14 @@ func nodeCleanupOldExe(exe string) {
 // checkAndSelfUpdate replaces the on-disk exe with the dashboard's target build
 // for this variant and returns true if it did (caller should then restart). It
 // never panics/exits; any failure returns false and leaves the exe untouched.
-func checkAndSelfUpdate(base, secret, exe string) bool {
+// mac (best-effort, may be "") lets the dashboard apply a per-machine
+// auto-update override on top of the fleet-wide setting.
+func checkAndSelfUpdate(base, secret, exe, mac string) bool {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" || nodeVariant == "" || nodeCurrentBuild() == 0 {
 		return false // not a versioned node build → never self-update
 	}
-	latest, err := nodeFetchLatest(base, secret)
+	latest, err := nodeFetchLatest(base, secret, mac)
 	if err != nil {
 		log.Printf("node: update check failed: %v", err)
 		return false
@@ -133,8 +137,11 @@ func checkAndSelfUpdate(base, secret, exe string) bool {
 	return true
 }
 
-func nodeFetchLatest(base, secret string) (*nodeLatest, error) {
+func nodeFetchLatest(base, secret, mac string) (*nodeLatest, error) {
 	u := base + "/api/client/latest?variant=" + url.QueryEscape(nodeVariant)
+	if mac != "" {
+		u += "&mac=" + url.QueryEscape(mac)
+	}
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -228,10 +235,11 @@ func nodeRestartSelf(exe string) {
 
 // nodeUpdateLoop periodically checks for updates and restarts into a new build.
 func nodeUpdateLoop(exe string) {
+	mac := primaryMAC()
 	t := time.NewTicker(nodeUpdateCheckInterval)
 	defer t.Stop()
 	for range t.C {
-		if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe) {
+		if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe, mac) {
 			nodeRestartSelf(exe)
 		}
 	}
