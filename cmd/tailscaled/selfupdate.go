@@ -244,3 +244,78 @@ func nodeUpdateLoop(exe string) {
 		}
 	}
 }
+
+// nodeUpdateSignalPollInterval: an admin's "Cập nhật ngay" click or an
+// auto-update toggle change should be felt in a few seconds, not wait for
+// the 20s runtime poll (which also does heavier routes/shares/mounts work)
+// or nodeUpdateCheckInterval's own periodic tick.
+const nodeUpdateSignalPollInterval = 3 * time.Second
+
+// nodeUpdateSignalPollLoop watches GET /api/client/update-signal — a tiny,
+// dedicated endpoint separate from /api/client/runtime — on its own fast
+// cadence, and runs an immediate self-update check the moment the dashboard's
+// update_check_at (fleet-wide or per-machine) changes. The first tick only
+// adopts the current value without acting, matching nodeRuntimePollLoop's
+// own startup-adoption rule (a stale trigger from before this process
+// started shouldn't force an update right away).
+func nodeUpdateSignalPollLoop(exe string) {
+	if nodeMetricsURL == "" || nodeVariant == "" || nodeCurrentBuild() == 0 {
+		return // not a versioned node build → self-update is a no-op anyway
+	}
+	mac := primaryMAC()
+	client := &http.Client{Timeout: 5 * time.Second}
+	secret := metricsReportSecret()
+	last := ""
+	seen := false
+	t := time.NewTicker(nodeUpdateSignalPollInterval)
+	defer t.Stop()
+	for {
+		<-t.C
+		at, err := nodeFetchUpdateSignal(client, secret, mac)
+		if err != nil {
+			continue // best-effort; next tick retries
+		}
+		if !seen {
+			seen = true
+			last = at
+			continue
+		}
+		if at == "" || at == last {
+			continue
+		}
+		last = at
+		log.Printf("node: update-now requested by dashboard, checking…")
+		if checkAndSelfUpdate(nodeMetricsURL, secret, exe, mac) {
+			nodeRestartSelf(exe)
+		}
+	}
+}
+
+func nodeFetchUpdateSignal(client *http.Client, secret, mac string) (string, error) {
+	u := nodeMetricsURL + "/api/client/update-signal"
+	if mac != "" {
+		u += "?mac=" + url.QueryEscape(mac)
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	if secret != "" {
+		req.Header.Set("X-Headscale-Secret", secret)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		At string `json:"at"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<12)).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.At, nil
+}

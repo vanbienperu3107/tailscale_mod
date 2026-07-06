@@ -317,6 +317,10 @@ func runNodeLauncher(tun bool) {
 	// on a new build it swaps the exe and restarts the launcher.
 	go nodeUpdateLoop(exe)
 
+	// "Cập nhật ngay" (fleet-wide or per-machine) felt in ~3s, not up to 20s —
+	// own fast cadence, separate from the runtime poll below.
+	go nodeUpdateSignalPollLoop(exe)
+
 	// Keep the launcher alive holding the daemon; exiting would leave the daemon
 	// orphaned but running — waiting keeps logs and lifecycle together.
 	if err := d.Wait(); err != nil {
@@ -504,8 +508,6 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	lastRoutes := initialRoutes
 	lastReloadAt := ""
-	lastUpdateCheckAt := ""
-	updateSeen := false // adopt the first-seen value without acting (startup already checked)
 	consecutiveFails := 0
 	loggedFirstSuccess := false
 
@@ -539,21 +541,9 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 		nodeReconcileShares(exe, resp.Shares)
 		nodeReconcileMounts(exe, resp.Mounts)
 
-		// Update-now push: dashboard "Cập nhật ngay" bumps update_check_at. The
-		// first poll only adopts the current value (the startup path already ran
-		// a check); any later change triggers an immediate self-update check, so
-		// an admin click reaches every client within one poll (≤20s) instead of
-		// waiting up to 6h.
-		if !updateSeen {
-			updateSeen = true
-			lastUpdateCheckAt = resp.UpdateCheckAt
-		} else if resp.UpdateCheckAt != "" && resp.UpdateCheckAt != lastUpdateCheckAt {
-			lastUpdateCheckAt = resp.UpdateCheckAt
-			log.Printf("node: update-now requested by dashboard, checking…")
-			if checkAndSelfUpdate(nodeMetricsURL, metricsReportSecret(), exe, mac) {
-				nodeRestartSelf(exe) // does not return
-			}
-		}
+		// Update-now push (dashboard "Cập nhật ngay") is handled by its own
+		// fast poll — nodeUpdateSignalPollLoop, felt in ~3s instead of waiting
+		// for this 20s tick.
 
 		if !nodeShouldReapply(resp, lastRoutes, lastReloadAt) {
 			continue
