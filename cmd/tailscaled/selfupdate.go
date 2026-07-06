@@ -248,8 +248,9 @@ func nodeUpdateLoop(exe string) {
 // nodeUpdateSignalPollInterval: an admin's "Cập nhật ngay" click or an
 // auto-update toggle change should be felt in a few seconds, not wait for
 // the 20s runtime poll (which also does heavier routes/shares/mounts work)
-// or nodeUpdateCheckInterval's own periodic tick.
-const nodeUpdateSignalPollInterval = 3 * time.Second
+// or nodeUpdateCheckInterval's own periodic tick. 1s to match
+// nodeBrowsePollInterval — same reasoning, same cost (one tiny GET).
+const nodeUpdateSignalPollInterval = 1 * time.Second
 
 // nodeUpdateSignalPollLoop watches GET /api/client/update-signal — a tiny,
 // dedicated endpoint separate from /api/client/runtime — on its own fast
