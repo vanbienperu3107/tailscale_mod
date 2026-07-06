@@ -27,7 +27,10 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
+
+	"tailscale.com/envknob"
 )
 
 // nodeShareDesired is one folder this node should be exporting via Taildrive.
@@ -168,6 +171,19 @@ func nodeDriveUnshare(exe, name string) error {
 // port differently — Taildrive's own docs use the @8080 form, matched here).
 // ---------------------------------------------------------------------------
 
+// dashboardSecretKnob authenticates the folder-picker calls below to the
+// CMS's public /api/client/*, /api/internal/* endpoints (checked
+// server-side against HEADSCALE_DASHBOARD_SECRET). Matches the
+// TS_<FEATURE>_SECRET envknob pattern already used by the other dashboard
+// reporters in this directory (derppingreport.go's TS_DERPPING_SECRET,
+// metricsreport.go's TS_METRICS_SECRET) — unlike those, this one
+// specifically covers nodePostBrowseResult, which WRITES data the admin UI
+// displays, so leaving it unauthenticated would let anyone who can reach
+// the dashboard's public port plant a fake directory listing for any mac.
+// Empty (unset) is a no-op, same fail-open shape as every other secret knob
+// in this file.
+var dashboardSecretKnob = envknob.RegisterString("TS_DASHBOARD_SECRET")
+
 // nodeMountedDrives tracks drive letters this launcher has mounted, keyed by
 // drive letter ("Z:") -> stable share key ("machine|share"), so later polls
 // can detect "already correct" (skip) vs. "grant revoked" (unmount).
@@ -192,6 +208,15 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) {
 		delete(nodeMountedDrives, drive)
 	}
 	for _, m := range toMount {
+		if !nodeValidMountShare(m.Share) {
+			// Unlike Drive (already normalized in nodePlanMounts), Share
+			// reaches here straight from the dashboard's JSON with no
+			// charset check — reject anything that could break out of the
+			// intended <tailnet>\<peer>\<share> UNC structure before it ever
+			// reaches fmt.Sprintf/net use.
+			log.Printf("node: folder-mount: rejecting mount with invalid share name %q", m.Share)
+			continue
+		}
 		shortName, suffix, err := nodeResolveDrivePeer(exe, m.OwnerIP)
 		if err != nil {
 			log.Printf("node: folder-mount: resolve peer %s failed: %v", m.OwnerIP, err)
@@ -217,12 +242,15 @@ type driveMountPlan struct {
 
 // nodePlanMounts is the pure diff between desired mounts and the drives
 // already mapped (mounted: drive -> key), producing what to mount and what to
-// unmount. freeLetters is called to auto-pick a letter for entries with no
-// explicit Drive; injected so this stays unit-testable without touching the
-// real filesystem. Deterministic given a deterministic freeLetters. Ignores
-// desired entries missing OwnerIP or Share (nothing to resolve/mount).
-func nodePlanMounts(desired []nodeMountDesired, mounted map[string]string, freeLetters func() string) (toMount []driveMountPlan, toUnmount []string) {
+// unmount. freeLetters is called (at most once per desired entry — see the
+// nodeNextFreeDriveLetter doc comment for why it must be exclude-aware, not
+// retried) to auto-pick a letter for entries with no explicit Drive; injected
+// so this stays unit-testable without touching the real filesystem.
+// Deterministic given a deterministic freeLetters. Ignores desired entries
+// missing OwnerIP or Share (nothing to resolve/mount).
+func nodePlanMounts(desired []nodeMountDesired, mounted map[string]string, freeLetters func(exclude map[string]bool) string) (toMount []driveMountPlan, toUnmount []string) {
 	want := map[string]bool{}
+	toUnmountSet := map[string]bool{}
 	usedThisPass := map[string]bool{}
 	for d := range mounted {
 		usedThisPass[d] = true
@@ -235,20 +263,33 @@ func nodePlanMounts(desired []nodeMountDesired, mounted map[string]string, freeL
 		key := m.Machine + "|" + m.Share
 		want[key] = true
 
+		// oldDrive is whatever this key is CURRENTLY mounted under (if any),
+		// found before deciding this round's drive — needed below to detect
+		// "admin pinned an explicit letter different from the one already in
+		// use" and release the stale one, instead of leaking it.
+		oldDrive := nodeDriveForKey(mounted, key)
+
 		drive := nodeNormalizeDriveLetter(m.Drive)
 		if drive == "" {
-			drive = nodeDriveForKey(mounted, key)
+			drive = oldDrive // no explicit pin -> keep the stable auto-assigned one
 		}
 		if drive == "" {
-			drive = freeLetters()
-			for drive != "" && usedThisPass[drive] {
-				drive = freeLetters()
-			}
+			// freeLetters is given usedThisPass so it can never hand back a
+			// letter already claimed earlier in this same pass — no retry
+			// loop here (a retry against a freeLetters that doesn't consult
+			// usedThisPass would spin forever, since nothing actually mounts
+			// until nodeReconcileMounts runs later; see the historical bug
+			// this replaced).
+			drive = freeLetters(usedThisPass)
 		}
 		if drive == "" {
 			continue // no free letter available this pass
 		}
 		usedThisPass[drive] = true
+
+		if oldDrive != "" && oldDrive != drive {
+			toUnmountSet[oldDrive] = true
+		}
 
 		if existing, ok := mounted[drive]; ok && existing == key {
 			continue // already correctly mounted
@@ -258,9 +299,13 @@ func nodePlanMounts(desired []nodeMountDesired, mounted map[string]string, freeL
 
 	for drive, key := range mounted {
 		if !want[key] {
-			toUnmount = append(toUnmount, drive)
+			toUnmountSet[drive] = true
 		}
 	}
+	for drive := range toUnmountSet {
+		toUnmount = append(toUnmount, drive)
+	}
+	sort.Strings(toUnmount) // deterministic order — toUnmountSet iteration isn't
 	return toMount, toUnmount
 }
 
@@ -285,18 +330,37 @@ func nodeNormalizeDriveLetter(s string) string {
 }
 
 // nodeNextFreeDriveLetter scans Z down to D (skip A/B/C — conventionally
-// floppy/reserved) for a letter with no local filesystem root, i.e. not
-// already a drive (mapped or physical). Best-effort: a race with something
-// else claiming the same letter between check and `net use` just surfaces as
-// a mount error on the next line, logged and retried next poll.
-var nodeNextFreeDriveLetter = func() string {
+// floppy/reserved) for a letter not in exclude with no local filesystem root,
+// i.e. not already a drive (mapped or physical). exclude MUST contain every
+// letter already claimed earlier in the current nodePlanMounts pass — os.Stat
+// alone can't see those, since nothing is actually `net use`d until
+// nodeReconcileMounts runs later, so two auto-pick entries checked back to
+// back would otherwise both see the same free letter. Best-effort otherwise:
+// a race with something else claiming the same letter between this check and
+// `net use` just surfaces as a mount error on the next line, logged and
+// retried next poll.
+var nodeNextFreeDriveLetter = func(exclude map[string]bool) string {
 	for l := 'Z'; l >= 'D'; l-- {
 		d := string(l) + ":"
+		if exclude[d] {
+			continue
+		}
 		if _, err := os.Stat(d + `\`); os.IsNotExist(err) {
 			return d
 		}
 	}
 	return ""
+}
+
+// nodeValidMountShare reports whether share is safe to interpolate into a UNC
+// path segment — must contain no path separator that could break out of the
+// intended <tailnet>\<peer>\<share> structure. Defense in depth: the owner's
+// own drive.NormalizeShareName (tailscale/drive/remote.go) already rejects
+// these characters when a share is created, but Share here comes straight
+// from the dashboard's JSON with no charset check of its own, unlike Drive
+// (already normalized by nodeNormalizeDriveLetter before reaching this far).
+func nodeValidMountShare(share string) bool {
+	return share != "" && !strings.ContainsAny(share, `\/`)
 }
 
 // nodeDriveMountUNC builds the WebDAV UNC path Taildrive serves a peer's
@@ -399,6 +463,13 @@ func nodeBrowsePoll(client *http.Client, mac string) {
 	if err != nil {
 		log.Printf("node: folder-browse: list %q failed: %v", path, err)
 		entries = nil // still report back so the admin UI doesn't hang waiting
+	} else {
+		// Every other dashboard-driven action in this file logs what it did
+		// on success, not just on failure (share/unshare, mount/unmount).
+		// This is the one action that can enumerate any directory name on the
+		// whole disk — leaving it silent on success would be the only gap in
+		// an otherwise-complete local audit trail.
+		log.Printf("node: folder-browse: listed %q (%d entries)", path, len(entries))
 	}
 	if err := nodePostBrowseResult(client, mac, path, entries); err != nil {
 		log.Printf("node: folder-browse: report result failed: %v", err)
@@ -409,6 +480,9 @@ func nodeFetchBrowseRequest(client *http.Client, mac string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, nodeMetricsURL+"/api/client/browse-request?mac="+mac, nil)
 	if err != nil {
 		return "", err
+	}
+	if authValue := dashboardSecretKnob(); authValue != "" {
+		req.Header.Set("X-Headscale-Secret", authValue)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -456,6 +530,9 @@ func nodePostBrowseResult(client *http.Client, mac, path string, entries []nodeB
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if authValue := dashboardSecretKnob(); authValue != "" {
+		req.Header.Set("X-Headscale-Secret", authValue)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
