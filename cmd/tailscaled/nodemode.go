@@ -285,6 +285,12 @@ func runNodeLauncher(tun bool) {
 	// for future fields too.
 	go nodeRuntimePollLoop(exe, nodeLANRoutes)
 
+	// Folder picker (Taildrive "Duyệt…"): its own fast-cadence loop, separate
+	// from the 20s runtime poll above. Browsing is an interactive admin
+	// action — a click should get a response in a few seconds, not wait for
+	// the next scheduled maintenance tick shared with routes/shares/updates.
+	go nodeBrowsePollLoop()
+
 	// Report (mac, hostname, nodeKey) to the dashboard once so it can assign a
 	// stable "canonical name" per physical MAC and auto-rename this node back
 	// to it if the OS hostname changed (reinstall/rename) — instead of
@@ -514,9 +520,10 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 		// nodeShouldReapply — these are independently idempotent (each call
 		// re-derives current state and only acts on a diff) and must
 		// self-heal if a share/mount was removed by something other than us.
+		// nodeBrowsePoll runs on its own faster ticker (nodeBrowsePollLoop),
+		// not here — see that function for why.
 		nodeReconcileShares(exe, resp.Shares)
 		nodeReconcileMounts(exe, resp.Mounts)
-		nodeBrowsePoll(client, mac)
 
 		// Update-now push: dashboard "Cập nhật ngay" bumps update_check_at. The
 		// first poll only adopts the current value (the startup path already ran
