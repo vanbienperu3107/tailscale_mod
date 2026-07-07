@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -272,44 +271,88 @@ var macVirtualMarkers = []string{
 	"hyper-v", "bluetooth", "loopback", "isatap", "teredo",
 }
 
+// macCandidate is one interface primaryMAC considers. Split out so the
+// selection rule (macNameIsVirtual / macIPv4IsReal / pickPrimaryMAC) is pure
+// and unit-testable without real network hardware.
+type macCandidate struct {
+	mac       string
+	hasRealIP bool
+}
+
+// macNameIsVirtual reports whether an interface name looks like a virtual /
+// overlay adapter that must not influence primary-MAC selection. Pure.
+func macNameIsVirtual(name string) bool {
+	name = strings.ToLower(name)
+	for _, m := range macVirtualMarkers {
+		if strings.Contains(name, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// macIPv4IsReal reports whether ip is a routable LAN/internet IPv4 — i.e. a
+// signal that its interface is the box's real NIC. Excludes non-IPv4, APIPA
+// (169.254/16) and the tailnet CGNAT range (100.64/10, where the TUN lives).
+// Pure.
+func macIPv4IsReal(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	if ip4.IsLinkLocalUnicast() { // 169.254.x — unconfigured
+		return false
+	}
+	if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 { // 100.64/10 tailnet
+		return false
+	}
+	return true
+}
+
+// pickPrimaryMAC chooses the stable MAC from candidates: an interface with a
+// real (LAN/internet) IPv4 beats one without; ties break on lowest MAC so the
+// choice is deterministic regardless of net.Interfaces() enumeration order.
+// Pure — the whole point is that adding/removing the wintun TUN adapter (vpn
+// vs proxy variant) cannot change the answer. Returns "" for no candidates.
+func pickPrimaryMAC(cands []macCandidate) string {
+	best := macCandidate{}
+	have := false
+	for _, c := range cands {
+		if !have {
+			best, have = c, true
+			continue
+		}
+		if c.hasRealIP != best.hasRealIP {
+			if c.hasRealIP {
+				best = c
+			}
+			continue
+		}
+		if c.mac < best.mac {
+			best = c
+		}
+	}
+	return best.mac
+}
+
 // primaryMAC returns a STABLE identifier MAC for this machine: the physical
 // NIC actually carrying LAN/internet traffic. Stability matters more than
 // picking any particular NIC — the dashboard keys folder-shares, runtime
-// config and browse requests by this value, so it must NOT change between
-// runs, reboots, or when the node switches build variants (which add/remove
-// the wintun TUN adapter and shuffle net.Interfaces() ordering).
-//
-// Selection: skip down/loopback/virtual adapters, then prefer an interface
-// with a real IPv4 (not tailnet 100.64/10, not APIPA 169.254) — that reliably
-// singles out the box's real Ethernet/Wi-Fi and ignores the TUN (tailnet IP)
-// and idle virtual adapters (no IP). Ties break on lowest MAC so the result
-// is deterministic regardless of enumeration order.
+// config, browse requests AND the reserved-IP-by-MAC lookup by this value, so
+// it must NOT change between runs, reboots, or when the node switches build
+// variants (which add/remove the wintun TUN adapter and shuffle
+// net.Interfaces() ordering).
 func primaryMAC() string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return ""
 	}
-	type cand struct {
-		mac       string
-		hasRealIP bool
-	}
-	var cands []cand
+	var cands []macCandidate
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		if len(ifc.HardwareAddr) == 0 {
-			continue
-		}
-		name := strings.ToLower(ifc.Name)
-		skip := false
-		for _, m := range macVirtualMarkers {
-			if strings.Contains(name, m) {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		if len(ifc.HardwareAddr) == 0 || macNameIsVirtual(ifc.Name) {
 			continue
 		}
 		hasRealIP := false
@@ -322,29 +365,12 @@ func primaryMAC() string {
 			case *net.IPAddr:
 				ip = v.IP
 			}
-			ip4 := ip.To4()
-			if ip4 == nil {
-				continue // only IPv4 counts as a "real LAN address" signal
+			if macIPv4IsReal(ip) {
+				hasRealIP = true
+				break
 			}
-			if ip4.IsLinkLocalUnicast() { // 169.254.x APIPA (unconfigured)
-				continue
-			}
-			if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 { // 100.64/10 tailnet
-				continue
-			}
-			hasRealIP = true
-			break
 		}
-		cands = append(cands, cand{mac: ifc.HardwareAddr.String(), hasRealIP: hasRealIP})
+		cands = append(cands, macCandidate{mac: ifc.HardwareAddr.String(), hasRealIP: hasRealIP})
 	}
-	if len(cands) == 0 {
-		return ""
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].hasRealIP != cands[j].hasRealIP {
-			return cands[i].hasRealIP // NICs with a real IPv4 win
-		}
-		return cands[i].mac < cands[j].mac // deterministic tiebreak
-	})
-	return cands[0].mac
+	return pickPrimaryMAC(cands)
 }

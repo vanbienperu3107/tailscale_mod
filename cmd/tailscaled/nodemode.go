@@ -243,8 +243,8 @@ func runNodeLauncher(tun bool) {
 // the entire node with nothing left running to notice or recover; an admin
 // had to find the dead process and relaunch it by hand.
 func nodeRunDaemonSupervised(exe, stateDir, logDir string, env []string, tun bool) {
-	backoff := 2 * time.Second
-	const maxBackoff = 30 * time.Second
+	const base, max = 2 * time.Second, 30 * time.Second
+	delay := time.Duration(0)
 	for {
 		start := time.Now()
 		err := nodeRunDaemonOnce(exe, stateDir, logDir, env, tun)
@@ -254,17 +254,34 @@ func nodeRunDaemonSupervised(exe, stateDir, logDir string, env []string, tun boo
 		} else {
 			log.Printf("node: daemon exited unexpectedly after %s: %v", ranFor.Round(time.Second), err)
 		}
-		// Ran long enough to be considered healthy → don't let one good run
-		// erase all memory of a bad patch, but also don't let a single early
-		// crash condemn every future restart to the max backoff forever.
-		if ranFor > maxBackoff {
-			backoff = 2 * time.Second
-		}
-		log.Printf("node: restarting daemon in %s…", backoff)
-		time.Sleep(backoff)
-		backoff = min(backoff*2, maxBackoff)
-		nodeKillConflicting() // free the LocalAPI pipe from the dead process first
+		delay = daemonRestartDelay(delay, ranFor, base, max)
+		log.Printf("node: restarting daemon in %s…", delay)
+		time.Sleep(delay)
+		// NOTE: no nodeKillConflicting() here — the daemon we just waited on has
+		// already exited (it can't still hold the LocalAPI pipe), and killing by
+		// image name on every restart risks taking out a legitimate concurrent
+		// instance. Cross-instance contention is handled once at launcher start
+		// (nodeKillConflicting in runNodeLauncher), not on the hot restart path.
 	}
+}
+
+// daemonRestartDelay decides how long to wait before restarting the daemon,
+// given the previous delay and how long the just-exited run lasted. A run that
+// survived at least `max` is treated as healthy and resets to `base` (a lone
+// crash shouldn't leave every future restart stuck at the ceiling); otherwise
+// the delay doubles from `base` up to `max`. Pure — unit-tested.
+func daemonRestartDelay(prev, ranFor, base, max time.Duration) time.Duration {
+	if ranFor >= max {
+		return base
+	}
+	next := prev * 2
+	if next < base {
+		next = base
+	}
+	if next > max {
+		next = max
+	}
+	return next
 }
 
 // nodeRunDaemonOnce starts one daemon instance, brings it up, and blocks until

@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -135,5 +136,84 @@ func TestMetricsPostReport(t *testing.T) {
 	body := string(gotBody)
 	if !strings.Contains(body, `"hostname":"itop"`) || !strings.Contains(body, `"path":"derp:vpn4-vn"`) {
 		t.Fatalf("unexpected body: %s", body)
+	}
+}
+
+// TestPickPrimaryMAC is the core stability guarantee: given the same physical
+// NIC, the chosen MAC must not change when virtual adapters (notably the vpn
+// variant's wintun TUN) appear or when net.Interfaces() ordering shuffles.
+func TestPickPrimaryMAC(t *testing.T) {
+	real := macCandidate{mac: "dc:4a:3e:3d:54:70", hasRealIP: true}   // physical Ethernet
+	tunA := macCandidate{mac: "00:ff:a8:6a:d8:72", hasRealIP: false}  // wintun (tailnet IP → not "real")
+	tunB := macCandidate{mac: "60:45:bd:49:ce:15", hasRealIP: false}  // another virtual, no real IP
+
+	tests := []struct {
+		name  string
+		cands []macCandidate
+		want  string
+	}{
+		{"empty", nil, ""},
+		{"single real", []macCandidate{real}, "dc:4a:3e:3d:54:70"},
+		{"real beats virtual regardless of order (proxy variant)", []macCandidate{tunB, real}, "dc:4a:3e:3d:54:70"},
+		{"real beats virtual after TUN added (vpn variant)", []macCandidate{tunA, real, tunB}, "dc:4a:3e:3d:54:70"},
+		{"real still wins when listed last", []macCandidate{tunA, tunB, real}, "dc:4a:3e:3d:54:70"},
+		{"no real IP anywhere → lowest MAC, deterministic", []macCandidate{tunB, tunA}, "00:ff:a8:6a:d8:72"},
+		{"no real IP, reversed order → same answer", []macCandidate{tunA, tunB}, "00:ff:a8:6a:d8:72"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pickPrimaryMAC(tt.cands); got != tt.want {
+				t.Fatalf("pickPrimaryMAC=%q want %q", got, tt.want)
+			}
+		})
+	}
+
+	// Explicit stability assertion: the with-TUN and without-TUN candidate sets
+	// (same physical NIC) MUST yield the identical MAC — the regression that
+	// caused folder-share owner churn and IP drift across variant switches.
+	withoutTUN := pickPrimaryMAC([]macCandidate{real, tunB})
+	withTUN := pickPrimaryMAC([]macCandidate{tunA, real, tunB})
+	if withoutTUN != withTUN {
+		t.Fatalf("MAC changed when TUN adapter present: %q vs %q", withoutTUN, withTUN)
+	}
+}
+
+func TestMacNameIsVirtual(t *testing.T) {
+	virtual := []string{
+		"Tailscale", "tailscale0", "wintun", "WireGuard (wg0)", "tun0",
+		"tap-windows", "vEthernet (WSL)", "docker0", "VMware Network Adapter",
+		"VirtualBox Host-Only", "Hyper-V Virtual Ethernet", "Bluetooth Network",
+		"Loopback Pseudo-Interface 1", "isatap.{GUID}", "Teredo Tunneling",
+	}
+	for _, n := range virtual {
+		if !macNameIsVirtual(n) {
+			t.Errorf("macNameIsVirtual(%q)=false, want true", n)
+		}
+	}
+	for _, n := range []string{"Ethernet", "Ethernet 2", "Wi-Fi", "eth0", "en0", "Local Area Connection"} {
+		if macNameIsVirtual(n) {
+			t.Errorf("macNameIsVirtual(%q)=true, want false", n)
+		}
+	}
+}
+
+func TestMacIPv4IsReal(t *testing.T) {
+	real := []string{"192.168.1.10", "10.0.0.5", "172.16.3.9", "8.8.8.8"}
+	for _, s := range real {
+		if !macIPv4IsReal(net.ParseIP(s)) {
+			t.Errorf("macIPv4IsReal(%s)=false, want true", s)
+		}
+	}
+	notReal := []string{"100.64.0.12", "100.100.100.100", "169.254.10.1"}
+	for _, s := range notReal {
+		if macIPv4IsReal(net.ParseIP(s)) {
+			t.Errorf("macIPv4IsReal(%s)=true, want false", s)
+		}
+	}
+	if macIPv4IsReal(net.ParseIP("fd7a:115c:a1e0::9")) {
+		t.Error("macIPv4IsReal(IPv6)=true, want false")
+	}
+	if macIPv4IsReal(nil) {
+		t.Error("macIPv4IsReal(nil)=true, want false")
 	}
 }
