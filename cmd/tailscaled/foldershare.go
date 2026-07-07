@@ -54,17 +54,47 @@ type nodeMountDesired struct {
 	Access  string `json:"access"` // "ro" | "rw" — informational; enforced by headscale
 }
 
+// nodeShareStatus / nodeMountStatus are what this node REPORTS back to the
+// dashboard after a reconcile pass (POST /api/internal/foldershare-status), so
+// an admin can see per-machine whether serving/mounting actually worked and,
+// on failure, the exact error (e.g. "System error 67") — instead of guessing.
+type nodeShareStatus struct {
+	Name  string `json:"name"`
+	Path  string `json:"path,omitempty"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type nodeMountStatus struct {
+	Share   string `json:"share"`
+	Machine string `json:"machine,omitempty"`
+	Drive   string `json:"drive,omitempty"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Owner side: reconcile Taildrive shares.
 // ---------------------------------------------------------------------------
 
 // nodeReconcileShares makes this node's live Taildrive shares match desired.
 // Fail-open: a listing/apply error is logged and left for the next poll tick.
-func nodeReconcileShares(exe string, desired []nodeShareDesired) {
+// Returns one nodeShareStatus per ENABLED desired share (ok=true if now being
+// served, ok=false+error if the apply failed) for reporting to the dashboard.
+func nodeReconcileShares(exe string, desired []nodeShareDesired) []nodeShareStatus {
 	current, err := nodeCurrentShares(exe)
 	if err != nil {
 		log.Printf("node: folder-share: could not list current shares: %v", err)
-		return
+		// Couldn't read live state → report every enabled desired share as
+		// failed with the list error, so the dashboard shows something is wrong
+		// rather than silently nothing.
+		var st []nodeShareStatus
+		for _, s := range desired {
+			if s.Enabled && s.Name != "" && s.Path != "" {
+				st = append(st, nodeShareStatus{Name: s.Name, Path: s.Path, OK: false, Error: "list shares: " + err.Error()})
+			}
+		}
+		return st
 	}
 
 	want := make(map[string]string, len(desired))
@@ -83,14 +113,31 @@ func nodeReconcileShares(exe string, desired []nodeShareDesired) {
 		}
 		log.Printf("node: folder-share: unshared %q", name)
 	}
+	applyErr := make(map[string]string)
 	for _, name := range toAdd {
 		path := want[name]
 		if err := nodeDriveShare(exe, name, path); err != nil {
+			applyErr[name] = err.Error()
 			log.Printf("node: folder-share: share %q -> %q failed: %v", name, path, err)
 			continue
 		}
 		log.Printf("node: folder-share: sharing %q -> %q", name, path)
 	}
+
+	// A desired enabled share is OK unless its apply just failed — this covers
+	// both "already serving" (not in toAdd) and "just added" (in toAdd, no err).
+	var st []nodeShareStatus
+	for _, s := range desired {
+		if !s.Enabled || s.Name == "" || s.Path == "" {
+			continue
+		}
+		if e, bad := applyErr[s.Name]; bad {
+			st = append(st, nodeShareStatus{Name: s.Name, Path: s.Path, OK: false, Error: e})
+		} else {
+			st = append(st, nodeShareStatus{Name: s.Name, Path: s.Path, OK: true})
+		}
+	}
+	return st
 }
 
 // nodeDiffShares is the pure diff between the live share set and the desired
@@ -193,9 +240,12 @@ var nodeMountedDrives = map[string]string{}
 // nodeReconcileMounts makes this node's mapped drives match desired. No-op on
 // non-Windows (drive-letter mounting is a Windows concept; other platforms
 // would use `tailscale drive` peer access directly or a WebDAV client).
-func nodeReconcileMounts(exe string, desired []nodeMountDesired) {
+// Returns one nodeMountStatus per desired mount (ok=true if mounted, ok=false
+// + error — e.g. "System error 67" — if resolve/mount failed) for the
+// dashboard. nil on non-Windows (feature not applicable).
+func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStatus {
 	if runtime.GOOS != "windows" {
-		return
+		return nil
 	}
 
 	toMount, toUnmount := nodePlanMounts(desired, nodeMountedDrives, nodeNextFreeDriveLetter)
@@ -208,6 +258,8 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) {
 		log.Printf("node: folder-mount: unmounted %s", drive)
 		delete(nodeMountedDrives, drive)
 	}
+	// key ("machine|share") -> error text of this pass's mount attempt.
+	mountErr := make(map[string]string)
 	for _, m := range toMount {
 		if !nodeValidMountShare(m.Share) {
 			// Unlike Drive (already normalized in nodePlanMounts), Share
@@ -215,22 +267,46 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) {
 			// charset check — reject anything that could break out of the
 			// intended <tailnet>\<peer>\<share> UNC structure before it ever
 			// reaches fmt.Sprintf/net use.
+			mountErr[m.Key] = "invalid share name"
 			log.Printf("node: folder-mount: rejecting mount with invalid share name %q", m.Share)
 			continue
 		}
 		shortName, suffix, err := nodeResolveDrivePeer(exe, m.OwnerIP)
 		if err != nil {
+			mountErr[m.Key] = "resolve peer " + m.OwnerIP + ": " + err.Error()
 			log.Printf("node: folder-mount: resolve peer %s failed: %v", m.OwnerIP, err)
 			continue
 		}
 		unc := nodeDriveMountUNC(suffix, shortName, m.Share)
 		if err := nodeMountDrive(m.Drive, unc); err != nil {
+			mountErr[m.Key] = err.Error()
 			log.Printf("node: folder-mount: mount %s -> %s failed: %v", m.Drive, unc, err)
 			continue
 		}
 		log.Printf("node: folder-mount: mounted %s -> %s", m.Drive, unc)
 		nodeMountedDrives[m.Drive] = m.Key
 	}
+
+	// Report per desired mount: OK if it now holds a drive letter and had no
+	// error this pass; else surface the error (or "not mounted" if it never
+	// got a letter — e.g. none free).
+	var st []nodeMountStatus
+	for _, m := range desired {
+		if m.OwnerIP == "" || m.Share == "" {
+			continue
+		}
+		key := m.Machine + "|" + m.Share
+		drive := nodeDriveForKey(nodeMountedDrives, key)
+		switch {
+		case mountErr[key] != "":
+			st = append(st, nodeMountStatus{Share: m.Share, Machine: m.Machine, Drive: m.Drive, OK: false, Error: mountErr[key]})
+		case drive != "":
+			st = append(st, nodeMountStatus{Share: m.Share, Machine: m.Machine, Drive: drive, OK: true})
+		default:
+			st = append(st, nodeMountStatus{Share: m.Share, Machine: m.Machine, Drive: m.Drive, OK: false, Error: "not mounted"})
+		}
+	}
+	return st
 }
 
 // driveMountPlan is one drive-letter assignment nodePlanMounts decided on.
@@ -598,6 +674,52 @@ func nodePostBrowseResult(client *http.Client, mac, path string, entries []nodeB
 	if authValue := dashboardSecretKnob(); authValue != "" {
 		req.Header.Set("X-Headscale-Secret", authValue)
 	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// nodeReportFolderShareStatus POSTs the result of a reconcile pass (which
+// shares this node serves, which mounts it holds, plus any errors) to the
+// dashboard's POST /api/internal/foldershare-status, so an admin sees per-PC
+// serve/mount health without inspecting each machine. Best-effort: an empty
+// base/mac or an HTTP failure just returns an error the caller logs — never
+// affects reconcile or connectivity. shares/mounts marshal as [] (not null)
+// when empty so the server sees an explicit "nothing to report" for this mac.
+func nodeReportFolderShareStatus(base, mac, hostname string, shares []nodeShareStatus, mounts []nodeMountStatus) error {
+	if base == "" || mac == "" {
+		return nil
+	}
+	if shares == nil {
+		shares = []nodeShareStatus{}
+	}
+	if mounts == nil {
+		mounts = []nodeMountStatus{}
+	}
+	body, err := json.Marshal(struct {
+		Mac      string            `json:"mac"`
+		Hostname string            `json:"hostname,omitempty"`
+		Shares   []nodeShareStatus `json:"shares"`
+		Mounts   []nodeMountStatus `json:"mounts"`
+	}{mac, hostname, shares, mounts})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(base, "/")+"/api/internal/foldershare-status", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authValue := dashboardSecretKnob(); authValue != "" {
+		req.Header.Set("X-Headscale-Secret", authValue)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

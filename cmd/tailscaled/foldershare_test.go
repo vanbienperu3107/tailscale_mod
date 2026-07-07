@@ -4,6 +4,10 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sort"
 	"testing"
@@ -305,4 +309,96 @@ func TestFolderShareValidMountShare(t *testing.T) {
 			t.Errorf("nodeValidMountShare(%q) = %v, want %v", tt.in, got, tt.want)
 		}
 	}
+}
+
+func TestNodeReportFolderShareStatusNoop(t *testing.T) {
+	// Empty base or mac must be a silent no-op (nil), never a request.
+	if err := nodeReportFolderShareStatus("", "dc:4a", "h", nil, nil); err != nil {
+		t.Errorf("empty base: want nil, got %v", err)
+	}
+	if err := nodeReportFolderShareStatus("http://127.0.0.1:0", "", "h", nil, nil); err != nil {
+		t.Errorf("empty mac: want nil, got %v", err)
+	}
+}
+
+func TestNodeReportFolderShareStatusPost(t *testing.T) {
+	type payload struct {
+		Mac      string            `json:"mac"`
+		Hostname string            `json:"hostname"`
+		Shares   []nodeShareStatus `json:"shares"`
+		Mounts   []nodeMountStatus `json:"mounts"`
+	}
+	var got payload
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Trailing slash on base must not double-up the path.
+	err := nodeReportFolderShareStatus(
+		srv.URL+"/",
+		"dc:4a:3e:3d:54:70",
+		"ITOP-THANHHN5",
+		[]nodeShareStatus{{Name: "tool", Path: "E:\\Tool", OK: true}},
+		[]nodeMountStatus{{Share: "tool", Drive: "Z:", OK: false, Error: "System error 67"}},
+	)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/internal/foldershare-status" {
+		t.Errorf("path = %q, want /api/internal/foldershare-status", gotPath)
+	}
+	if got.Mac != "dc:4a:3e:3d:54:70" || got.Hostname != "ITOP-THANHHN5" {
+		t.Errorf("mac/hostname mismatch: %+v", got)
+	}
+	if len(got.Shares) != 1 || !got.Shares[0].OK || got.Shares[0].Name != "tool" {
+		t.Errorf("shares mismatch: %+v", got.Shares)
+	}
+	if len(got.Mounts) != 1 || got.Mounts[0].OK || got.Mounts[0].Error != "System error 67" {
+		t.Errorf("mounts mismatch: %+v", got.Mounts)
+	}
+}
+
+func TestNodeReportFolderShareStatusNilMarshalsEmpty(t *testing.T) {
+	// nil shares/mounts must serialize as [] (not null) so the server sees an
+	// explicit empty report rather than a decode edge case.
+	var rawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rawBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	if err := nodeReportFolderShareStatus(srv.URL, "dc:4a", "h", nil, nil); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if !contains(rawBody, `"shares":[]`) || !contains(rawBody, `"mounts":[]`) {
+		t.Errorf("nil should marshal as []: body=%s", rawBody)
+	}
+}
+
+func TestNodeReportFolderShareStatusHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if err := nodeReportFolderShareStatus(srv.URL, "dc:4a", "h", nil, nil); err == nil {
+		t.Error("want error on non-200, got nil")
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
