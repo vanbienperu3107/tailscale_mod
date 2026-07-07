@@ -86,6 +86,63 @@ func init() {
 			hi.WoLMACs = []string{mac}
 		}
 	})
+
+	// Run the dashboard integration (folder-share reconcile+report, folder
+	// browse, runtime config, device-register) INSIDE the always-on daemon
+	// process, not the launcher. The launcher is a foreground wrapper a user
+	// can close (its window); the daemon (tailscaled) keeps running and is what
+	// stays "on". Before, these pollers lived only in the launcher, so closing
+	// it silently stopped folder-sharing while the daemon looked online. Only
+	// the daemon invocation of a node build runs them (see nodeIsDaemonProc);
+	// the launcher no longer starts them, and short-lived CLI subprocesses
+	// (`<exe> status`, `<exe> drive share`, spawned BY these loops) skip it, so
+	// there's no duplication or recursion.
+	if nodeMode != "" && nodeMetricsURL != "" && nodeIsDaemonProc() {
+		go nodeDaemonDashboardLoops()
+	}
+}
+
+// nodeIsDaemonProc reports whether THIS process is the tailscaled daemon
+// invocation — the launcher runs the same binary with tailscaled flags
+// (`--tun`, `--statedir`, ...), so the first arg starts with '-'. The launcher
+// itself (no args or a mode verb like "vpn"/"portable"/"run") and CLI
+// subprocesses ("status", "drive", ...) do not, and thus return false.
+func nodeIsDaemonProc() bool {
+	a := os.Args[1:]
+	return len(a) > 0 && strings.HasPrefix(a[0], "-")
+}
+
+// nodeDaemonDashboardLoops waits for the daemon's LocalAPI to accept commands,
+// then starts the dashboard pollers in-process so they live exactly as long as
+// the daemon (surviving the launcher being closed). The pollers drive the local
+// `<exe>` CLI (drive share, status, net use), which needs the LocalAPI up —
+// hence the readiness wait. Best-effort and capped; each poller is itself
+// idempotent and retry-safe on its own ticker.
+func nodeDaemonDashboardLoops() {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("node: daemon dashboard: cannot find own path: %v", err)
+		return
+	}
+	// Wait (capped ~3min) until `<exe> status` succeeds — i.e. the LocalAPI is
+	// serving — so the pollers' CLI calls don't all fail on the first ticks.
+	ready := false
+	for i := 0; i < 90; i++ {
+		time.Sleep(2 * time.Second)
+		c := exec.Command(exe, "status")
+		c.Env = append(os.Environ(), "TS_BE_CLI=1")
+		if c.Run() == nil {
+			ready = true
+			break
+		}
+	}
+	if !ready {
+		log.Printf("node: daemon dashboard: LocalAPI not ready after wait; starting pollers anyway (they self-retry)")
+	}
+	log.Printf("node: daemon-side dashboard pollers starting (dashboard=%s)", nodeMetricsURL)
+	go nodeRuntimePollLoop(exe, nodeLANRoutes)
+	go nodeBrowsePollLoop()
+	go nodeRegisterDeviceIdentity(exe)
 }
 
 // maybeRunNode handles the node-launcher subcommands for node-mode builds.
@@ -222,14 +279,13 @@ func runNodeLauncher(tun bool) {
 		}
 	}
 
-	// Background pollers: started ONCE, independent of the daemon's own
-	// lifecycle below. They talk to the dashboard over HTTP and drive the
-	// local `<exe>` CLI, which always finds whichever daemon is currently
-	// listening on the LocalAPI socket — they don't need restarting when
-	// nodeRunDaemonSupervised below restarts a crashed daemon.
-	go nodeRuntimePollLoop(exe, nodeLANRoutes)
-	go nodeBrowsePollLoop()
-	go nodeRegisterDeviceIdentity(exe)
+	// Self-update pollers stay in the launcher: applying an update means
+	// re-exec'ing a new binary, which is the launcher's job (it supervises and
+	// restarts the daemon). The dashboard pollers that must survive the launcher
+	// being closed — runtime config, folder-share reconcile+report, folder
+	// browse, device-register — now run INSIDE the daemon instead (see init's
+	// nodeDaemonDashboardLoops), so folder-sharing keeps working headless even
+	// after this launcher window is closed.
 	go nodeUpdateLoop(exe)
 	go nodeUpdateSignalPollLoop(exe)
 
