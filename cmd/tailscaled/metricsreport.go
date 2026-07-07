@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -257,13 +258,42 @@ func firstV4(ips []netip.Addr) string {
 	return ""
 }
 
-// primaryMAC returns a best-guess primary interface MAC: the first up,
-// non-loopback, non-Tailscale interface that has a hardware address.
+// macVirtualMarkers are substrings of interface names that indicate a virtual
+// / overlay adapter whose presence must NOT influence which MAC we call
+// "primary". The tailnet TUN itself (tailscale/wintun) is the worst offender:
+// it exists only in the vpn variant, so without excluding it a node's primary
+// MAC would differ between the proxy (userspace, no TUN) and vpn (TUN) builds
+// — which reassigns the node a brand-new identity on every variant switch and
+// silently breaks per-MAC features (folder-share owner binding, browse
+// requests, runtime config) that were set up under the old MAC.
+var macVirtualMarkers = []string{
+	"tailscale", "wintun", "wg", "tun", "tap",
+	"vethernet", "veth", "docker", "vmware", "virtualbox", "vbox",
+	"hyper-v", "bluetooth", "loopback", "isatap", "teredo",
+}
+
+// primaryMAC returns a STABLE identifier MAC for this machine: the physical
+// NIC actually carrying LAN/internet traffic. Stability matters more than
+// picking any particular NIC — the dashboard keys folder-shares, runtime
+// config and browse requests by this value, so it must NOT change between
+// runs, reboots, or when the node switches build variants (which add/remove
+// the wintun TUN adapter and shuffle net.Interfaces() ordering).
+//
+// Selection: skip down/loopback/virtual adapters, then prefer an interface
+// with a real IPv4 (not tailnet 100.64/10, not APIPA 169.254) — that reliably
+// singles out the box's real Ethernet/Wi-Fi and ignores the TUN (tailnet IP)
+// and idle virtual adapters (no IP). Ties break on lowest MAC so the result
+// is deterministic regardless of enumeration order.
 func primaryMAC() string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return ""
 	}
+	type cand struct {
+		mac       string
+		hasRealIP bool
+	}
+	var cands []cand
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
 			continue
@@ -272,10 +302,49 @@ func primaryMAC() string {
 			continue
 		}
 		name := strings.ToLower(ifc.Name)
-		if strings.Contains(name, "tailscale") || strings.Contains(name, "wg") {
+		skip := false
+		for _, m := range macVirtualMarkers {
+			if strings.Contains(name, m) {
+				skip = true
+				break
+			}
+		}
+		if skip {
 			continue
 		}
-		return ifc.HardwareAddr.String()
+		hasRealIP := false
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			ip4 := ip.To4()
+			if ip4 == nil {
+				continue // only IPv4 counts as a "real LAN address" signal
+			}
+			if ip4.IsLinkLocalUnicast() { // 169.254.x APIPA (unconfigured)
+				continue
+			}
+			if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 { // 100.64/10 tailnet
+				continue
+			}
+			hasRealIP = true
+			break
+		}
+		cands = append(cands, cand{mac: ifc.HardwareAddr.String(), hasRealIP: hasRealIP})
 	}
-	return ""
+	if len(cands) == 0 {
+		return ""
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].hasRealIP != cands[j].hasRealIP {
+			return cands[i].hasRealIP // NICs with a real IPv4 win
+		}
+		return cands[i].mac < cands[j].mac // deterministic tiebreak
+	})
+	return cands[0].mac
 }
