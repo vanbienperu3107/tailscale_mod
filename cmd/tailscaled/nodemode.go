@@ -535,6 +535,7 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 		log.Printf("node: runtime poll: disabled (could not determine primary MAC)")
 		return
 	}
+	hostname, _ := os.Hostname() // display hint for the folder-share status report
 	log.Printf("node: runtime poll: starting (dashboard=%s mac=%s, every %s)", nodeMetricsURL, mac, nodeRuntimePollInterval)
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -570,8 +571,14 @@ func nodeRuntimePollLoop(exe, initialRoutes string) {
 		// self-heal if a share/mount was removed by something other than us.
 		// nodeBrowsePoll runs on its own faster ticker (nodeBrowsePollLoop),
 		// not here — see that function for why.
-		nodeReconcileShares(exe, resp.Shares)
-		nodeReconcileMounts(exe, resp.Mounts)
+		shareSt := nodeReconcileShares(exe, resp.Shares)
+		mountSt := nodeReconcileMounts(exe, resp.Mounts)
+		// Report serve/mount result (incl. errors like "System error 67") so
+		// the dashboard shows per-PC folder-share health. Best-effort — a
+		// report failure never affects reconcile or connectivity.
+		if err := nodeReportFolderShareStatus(nodeMetricsURL, mac, hostname, shareSt, mountSt); err != nil {
+			log.Printf("node: folder-share: report status failed: %v", err)
+		}
 
 		// Update-now push (dashboard "Cập nhật ngay") is handled by its own
 		// fast poll — nodeUpdateSignalPollLoop, felt in ~3s instead of waiting
