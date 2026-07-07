@@ -4,9 +4,37 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 )
+
+// TestNodeIsDaemonProc verifies which invocations count as the daemon (where
+// the dashboard pollers now run) vs the launcher / CLI (where they must NOT):
+// only tailscaled-flag invocations (first arg starts with '-') are the daemon.
+func TestNodeIsDaemonProc(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string // os.Args including argv[0]
+		want bool
+	}{
+		{"daemon --statedir", []string{"exe", "--statedir=x", "--tun=userspace-networking"}, true},
+		{"daemon --tun", []string{"exe", "--tun=tailscale0"}, true},
+		{"launcher no args", []string{"exe"}, false},
+		{"launcher verb vpn", []string{"exe", "vpn"}, false},
+		{"launcher verb portable", []string{"exe", "portable"}, false},
+		{"cli status", []string{"exe", "status"}, false},
+		{"cli drive share", []string{"exe", "drive", "share", "tool", "E:\\Tool"}, false},
+	}
+	saved := os.Args
+	defer func() { os.Args = saved }()
+	for _, tt := range tests {
+		os.Args = tt.args
+		if got := nodeIsDaemonProc(); got != tt.want {
+			t.Errorf("%s: nodeIsDaemonProc(%v) = %v, want %v", tt.name, tt.args, got, tt.want)
+		}
+	}
+}
 
 // TestNodeShouldReapply validates the decision logic behind the runtime poll
 // loop: reapply on an actual advertise_routes change, OR on a distinct
