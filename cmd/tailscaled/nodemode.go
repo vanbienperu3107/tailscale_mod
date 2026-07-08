@@ -445,6 +445,23 @@ func nodeInstall() {
 			log.Fatalf("install: schtasks failed: %v", err)
 		}
 		log.Printf("node: autostart installed (Task Scheduler task 'TailscaleNode').")
+		// Make the Taildrive network drives that the elevated daemon mounts via
+		// WebDAV (Z:, M:, ...) visible in the interactive (non-elevated) user's
+		// Explorer. Without EnableLinkedConnections Windows keeps the elevated
+		// and non-elevated logon tokens' drive maps separate, so the user never
+		// sees the shares the daemon mapped — the exact "net use shows Z: but
+		// Explorer doesn't" confusion. Takes effect on the next reboot.
+		// Best-effort: a failure never blocks autostart, and the share is still
+		// reachable via its \\100.100.100.100@8080\... UNC regardless.
+		rc := exec.Command("reg", "add",
+			`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`,
+			"/v", "EnableLinkedConnections", "/t", "REG_DWORD", "/d", "1", "/f")
+		rc.Stdout, rc.Stderr = os.Stdout, os.Stderr
+		if err := rc.Run(); err != nil {
+			log.Printf("node: could not set EnableLinkedConnections (%v); mapped Taildrive drives may only appear in an elevated Explorer until it is set manually", err)
+		} else {
+			log.Printf("node: EnableLinkedConnections=1 set — reboot once so mapped Taildrive drives (Z:, M:, ...) show in normal Explorer.")
+		}
 	case "linux":
 		unit := "[Unit]\n" +
 			"Description=Tailscale (mod) node\n" +
