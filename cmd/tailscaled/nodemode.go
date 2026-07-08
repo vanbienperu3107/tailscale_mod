@@ -183,6 +183,19 @@ func maybeRunNode() bool {
 		nodeStop()
 		return true
 	}
+	switch args[0] {
+	case "serve-taildrive", "be-child":
+		// tailscaled-internal subcommands: the Taildrive owner file-server
+		// backend (spawned as `<exe> serve-taildrive <name> <path>...`) and
+		// childproc. These are neither node verbs nor tailscale CLI verbs —
+		// hand them back to tailscaled's normal subcommand dispatch, or the
+		// owner's WebDAV backend never starts and accessors get HTTP 500 on
+		// mount (surfacing as Windows "System error 59"). Note: we do NOT
+		// blanket-forward every subCommands key here — "debug" is also a CLI
+		// verb (the node uses `<exe> debug prefs` with TS_BE_CLI=1), so an
+		// explicit allowlist avoids changing its routing.
+		return false
+	}
 	// Any other verb (status, ping, up, down, ...) -> tailscale CLI in this binary.
 	if beCLI != nil {
 		beCLI()

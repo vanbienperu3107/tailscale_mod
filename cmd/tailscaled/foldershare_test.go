@@ -402,3 +402,29 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestNodeShareSig(t *testing.T) {
+	// Order-independent: same shares in any map iteration order → same sig, so
+	// a poll returning the same set never needlessly restarts the file server.
+	a := nodeShareSig(map[string]string{"docs": `E:\Docs`, "tool": `E:\Tool`})
+	b := nodeShareSig(map[string]string{"tool": `E:\Tool`, "docs": `E:\Docs`})
+	if a != b {
+		t.Errorf("sig must be order-independent: %q vs %q", a, b)
+	}
+	// Empty set is stable and distinct from any non-empty set.
+	if nodeShareSig(map[string]string{}) != "" {
+		t.Errorf("empty share set should sig to empty string, got %q", nodeShareSig(map[string]string{}))
+	}
+	// A changed path (same name) must change the signature (triggers restart).
+	if nodeShareSig(map[string]string{"docs": `E:\Docs`}) == nodeShareSig(map[string]string{"docs": `F:\Docs`}) {
+		t.Error("different path for same share name must change the signature")
+	}
+	// An added share must change the signature.
+	if a == nodeShareSig(map[string]string{"docs": `E:\Docs`}) {
+		t.Error("adding a share must change the signature")
+	}
+	// A share name that is a prefix of another must not collide (NUL delimiter).
+	if nodeShareSig(map[string]string{"ab": "x", "c": "y"}) == nodeShareSig(map[string]string{"a": "bxc", "": "y"}) {
+		t.Error("delimiter must prevent name/path concatenation collisions")
+	}
+}

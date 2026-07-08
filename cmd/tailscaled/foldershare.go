@@ -19,9 +19,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -29,6 +31,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"tailscale.com/envknob"
@@ -124,6 +127,15 @@ func nodeReconcileShares(exe string, desired []nodeShareDesired) []nodeShareStat
 		log.Printf("node: folder-share: sharing %q -> %q", name, path)
 	}
 
+	// Owner backend: ensure a Taildrive WebDAV file server is running for
+	// exactly this share set and its address is registered with tailscaled.
+	// Recording a share in prefs (above) does NOT by itself serve any bytes —
+	// upstream the GUI/tray app starts the file server, which this headless
+	// build lacks, so without this every accessor's request returns HTTP 500
+	// (surfacing on the grantee as Windows "System error 59"). Windows-only;
+	// elsewhere driveimpl spawns per-user servers automatically.
+	nodeEnsureDriveFileServer(exe, want)
+
 	// A desired enabled share is OK unless its apply just failed — this covers
 	// both "already serving" (not in toAdd) and "just added" (in toAdd, no err).
 	var st []nodeShareStatus
@@ -197,6 +209,141 @@ func nodeDriveShare(exe, name, path string) error {
 
 func nodeDriveUnshare(exe, name string) error {
 	c := exec.Command(exe, "drive", "unshare", name)
+	c.Env = append(os.Environ(), "TS_BE_CLI=1")
+	out, err := c.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Owner side: Taildrive WebDAV file-server backend.
+//
+// `tailscale drive share` only records a share in prefs; it does not serve any
+// bytes. Serving requires a separate WebDAV file server whose address is
+// registered with tailscaled via DriveSetServerAddr. On platforms where
+// drive.AllowShareAs() is true (UNIX) driveimpl spawns that server itself,
+// per accessing user. On Windows it's false, and upstream the GUI/tray app is
+// responsible for starting one file server and registering its address — which
+// this headless single-file build has no equivalent of. The result was that
+// itop "shared" a folder (prefs updated, dashboard showed ok) but every
+// accessor's WebDAV request returned HTTP 500, surfacing on the grantee as
+// Windows "System error 59". We replicate the GUI here: spawn `<exe>
+// serve-taildrive <name> <path>...` (a tailscaled subcommand — see
+// tailscaled_drive.go, and the fall-through in nodemode.go's maybeRunNode),
+// read the "secretToken|addr" line it prints, and register it via `<exe> drive
+// set-server-addr`. This runs from the always-on daemon poll loop, so the file
+// server is a daemon child and survives a launcher-window close.
+var (
+	nodeDriveFSMu  sync.Mutex
+	nodeDriveFSCmd *exec.Cmd // running serve-taildrive child, or nil
+	nodeDriveFSSig string    // signature of the share set the child serves
+)
+
+// nodeEnsureDriveFileServer makes the owner's file server match want
+// (shareName->path, already filtered to enabled). It (re)starts the
+// serve-taildrive child when the share set changes or the child died, and
+// registers the new address; when want is empty it stops the child. Windows
+// only. Fail-open: any error is logged and retried on the next poll tick.
+func nodeEnsureDriveFileServer(exe string, want map[string]string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	sig := nodeShareSig(want)
+
+	nodeDriveFSMu.Lock()
+	defer nodeDriveFSMu.Unlock()
+
+	// Already serving exactly this set with a live child → nothing to do.
+	if nodeDriveFSCmd != nil && sig == nodeDriveFSSig {
+		return
+	}
+
+	// Stop any previous server (share set changed, or it exited).
+	if nodeDriveFSCmd != nil && nodeDriveFSCmd.Process != nil {
+		_ = nodeDriveFSCmd.Process.Kill()
+	}
+	nodeDriveFSCmd = nil
+	nodeDriveFSSig = ""
+
+	if len(want) == 0 {
+		return // no shares → no file server needed
+	}
+
+	args := []string{"serve-taildrive"}
+	for name, path := range want {
+		args = append(args, name, path)
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Env = os.Environ() // NOT TS_BE_CLI: serve-taildrive is a tailscaled subcommand
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("node: folder-share: fileserver stdout pipe: %v", err)
+		return
+	}
+	nodeHideChildWindow(cmd)
+	if err := cmd.Start(); err != nil {
+		log.Printf("node: folder-share: start fileserver: %v", err)
+		return
+	}
+
+	// The child prints "secretToken|127.0.0.1:port" as its first stdout line.
+	sc := bufio.NewScanner(stdout)
+	if !sc.Scan() {
+		log.Printf("node: folder-share: fileserver produced no address")
+		_ = cmd.Process.Kill()
+		return
+	}
+	addr := strings.TrimSpace(sc.Text())
+	// Drain the rest so the child never blocks writing to a full pipe.
+	go func() { _, _ = io.Copy(io.Discard, stdout) }()
+	// Reap on exit and clear state so the next poll respawns it.
+	go func() {
+		_ = cmd.Wait()
+		nodeDriveFSMu.Lock()
+		if nodeDriveFSCmd == cmd {
+			nodeDriveFSCmd = nil
+			nodeDriveFSSig = ""
+		}
+		nodeDriveFSMu.Unlock()
+	}()
+
+	if err := nodeDriveSetServerAddr(exe, addr); err != nil {
+		log.Printf("node: folder-share: register fileserver addr: %v", err)
+		_ = cmd.Process.Kill()
+		return
+	}
+	nodeDriveFSCmd = cmd
+	nodeDriveFSSig = sig
+	log.Printf("node: folder-share: Taildrive file server up for %d share(s)", len(want))
+}
+
+// nodeShareSig is a stable, order-independent signature of the name->path
+// share set, so a poll returning the same shares doesn't needlessly restart
+// the file server. Pure — unit-tested without exec.
+func nodeShareSig(want map[string]string) string {
+	names := make([]string, 0, len(want))
+	for n := range want {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, n := range names {
+		b.WriteString(n)
+		b.WriteByte(0)
+		b.WriteString(want[n])
+		b.WriteByte(0)
+	}
+	return b.String()
+}
+
+// nodeDriveSetServerAddr registers the file-server address with tailscaled via
+// the CLI (which owns the localapi client — kept out of this always-compiled
+// file so it doesn't pull tailscale.com/client/local into the minimal build,
+// see cmd/tailscaled/deps_test.go TestOmitLocalClient).
+func nodeDriveSetServerAddr(exe, addr string) error {
+	c := exec.Command(exe, "drive", "set-server-addr", addr)
 	c.Env = append(os.Environ(), "TS_BE_CLI=1")
 	out, err := c.CombinedOutput()
 	if err != nil {
