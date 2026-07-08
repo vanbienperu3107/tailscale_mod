@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	driveShareUsage   = "tailscale drive share <name> <path>"
-	driveRenameUsage  = "tailscale drive rename <oldname> <newname>"
-	driveUnshareUsage = "tailscale drive unshare <name>"
-	driveListUsage    = "tailscale drive list"
+	driveShareUsage         = "tailscale drive share <name> <path>"
+	driveRenameUsage        = "tailscale drive rename <oldname> <newname>"
+	driveUnshareUsage       = "tailscale drive unshare <name>"
+	driveListUsage          = "tailscale drive list"
+	driveSetServerAddrUsage = "tailscale drive set-server-addr <token|addr>"
 )
 
 func init() {
@@ -63,8 +64,29 @@ func driveCmd() *ffcli.Command {
 				ShortHelp:  "[ALPHA] List current shares",
 				Exec:       runDriveList,
 			},
+			{
+				// Internal: register the address of the local WebDAV file
+				// server that actually serves this node's shares. Normally
+				// done by the GUI/tray app; the headless single-file "node"
+				// build has no GUI, so its daemon calls this after spawning
+				// `tailscaled serve-taildrive` (see cmd/tailscaled/foldershare.go).
+				Name:       "set-server-addr",
+				ShortUsage: driveSetServerAddrUsage,
+				ShortHelp:  "[INTERNAL] Set the Taildrive file-server address",
+				Exec:       runDriveSetServerAddr,
+			},
 		},
 	}
+}
+
+// runDriveSetServerAddr is the entry point for "tailscale drive
+// set-server-addr". addr is the "secretToken|host:port" line printed by
+// `tailscaled serve-taildrive`.
+func runDriveSetServerAddr(ctx context.Context, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: %s", driveSetServerAddrUsage)
+	}
+	return localClient.DriveSetServerAddr(ctx, args[0])
 }
 
 // runDriveShare is the entry point for the "tailscale drive share" command.
