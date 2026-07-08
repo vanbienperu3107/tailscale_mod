@@ -267,6 +267,7 @@ func firstV4(ips []netip.Addr) string {
 // requests, runtime config) that were set up under the old MAC.
 var macVirtualMarkers = []string{
 	"tailscale", "wintun", "wg", "tun", "tap",
+	"openvpn", "wireguard",
 	"vethernet", "veth", "docker", "vmware", "virtualbox", "vbox",
 	"hyper-v", "bluetooth", "loopback", "isatap", "teredo",
 }
@@ -279,8 +280,10 @@ type macCandidate struct {
 	hasRealIP bool
 }
 
-// macNameIsVirtual reports whether an interface name looks like a virtual /
-// overlay adapter that must not influence primary-MAC selection. Pure.
+// macNameIsVirtual reports whether a string (an interface connection name, or
+// on Windows the adapter Description/FriendlyName) contains a marker of a
+// virtual / overlay adapter that must not influence primary-MAC selection.
+// Pure.
 func macNameIsVirtual(name string) bool {
 	name = strings.ToLower(name)
 	for _, m := range macVirtualMarkers {
@@ -290,6 +293,17 @@ func macNameIsVirtual(name string) bool {
 	}
 	return false
 }
+
+// macAdapterExtraNames returns, keyed by interface name (the adapter
+// FriendlyName, which is exactly what net.Interface.Name is on Windows), extra
+// adapter text to ALSO test against macVirtualMarkers in primaryMAC. On
+// Windows, net.Interface.Name is only the *connection* name (e.g. "Ethernet
+// 2"), which for a TAP/VPN adapter often looks ordinary and hides its nature —
+// the adapter Description ("TAP-Windows Adapter V9 for OpenVPN Connect")
+// reveals it. Set by metricsreport_windows.go via winipcfg.GetAdaptersAddresses;
+// nil elsewhere (the connection name alone is enough on Linux). Best-effort: a
+// nil return just falls back to name-only detection.
+var macAdapterExtraNames func() map[string]string
 
 // macIPv4IsReal reports whether ip is a routable LAN/internet IPv4 — i.e. a
 // signal that its interface is the box's real NIC. Excludes non-IPv4, APIPA
@@ -347,12 +361,24 @@ func primaryMAC() string {
 	if err != nil {
 		return ""
 	}
+	// On Windows, also consult adapter Descriptions (see macAdapterExtraNames):
+	// the connection name alone lets TAP/VPN adapters (e.g. OpenVPN's, MAC
+	// 00:ff:...) masquerade as a real NIC and win primary-MAC selection.
+	var extra map[string]string
+	if macAdapterExtraNames != nil {
+		extra = macAdapterExtraNames()
+	}
 	var cands []macCandidate
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		if len(ifc.HardwareAddr) == 0 || macNameIsVirtual(ifc.Name) {
+		if len(ifc.HardwareAddr) == 0 {
+			continue
+		}
+		mac := ifc.HardwareAddr.String()
+		// extra[ifc.Name] on a nil map is "" -> macNameIsVirtual("") is false.
+		if macNameIsVirtual(ifc.Name) || macNameIsVirtual(extra[ifc.Name]) {
 			continue
 		}
 		hasRealIP := false
@@ -370,7 +396,7 @@ func primaryMAC() string {
 				break
 			}
 		}
-		cands = append(cands, macCandidate{mac: ifc.HardwareAddr.String(), hasRealIP: hasRealIP})
+		cands = append(cands, macCandidate{mac: mac, hasRealIP: hasRealIP})
 	}
 	return pickPrimaryMAC(cands)
 }

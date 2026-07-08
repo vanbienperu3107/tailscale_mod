@@ -184,13 +184,26 @@ func TestMacNameIsVirtual(t *testing.T) {
 		"tap-windows", "vEthernet (WSL)", "docker0", "VMware Network Adapter",
 		"VirtualBox Host-Only", "Hyper-V Virtual Ethernet", "Bluetooth Network",
 		"Loopback Pseudo-Interface 1", "isatap.{GUID}", "Teredo Tunneling",
+		// Windows adapter Descriptions (what macAdapterExtraNames feeds in on
+		// Windows). A TAP/VPN adapter's *connection* name looks ordinary (see
+		// the not-virtual list below), so the Description is what unmasks it —
+		// this is the votam-pc bug: it picked the OpenVPN TAP adapter's MAC.
+		"TAP-Windows Adapter V9 for OpenVPN Connect",
+		"WireGuard Tunnel", "OpenVPN Data Channel Offload",
 	}
 	for _, n := range virtual {
 		if !macNameIsVirtual(n) {
 			t.Errorf("macNameIsVirtual(%q)=false, want true", n)
 		}
 	}
-	for _, n := range []string{"Ethernet", "Ethernet 2", "Wi-Fi", "eth0", "en0", "Local Area Connection"} {
+	// Real physical-NIC connection names AND descriptions must stay non-virtual.
+	// The connection names "Ethernet 2"/"Local Area Connection" are exactly what
+	// a TAP adapter also uses — which is why name alone is insufficient and
+	// primaryMAC additionally checks the Description on Windows.
+	for _, n := range []string{
+		"Ethernet", "Ethernet 2", "Wi-Fi", "eth0", "en0", "Local Area Connection",
+		"Intel(R) Wi-Fi 6 AX210 160MHz", "Realtek PCIe GbE Family Controller",
+	} {
 		if macNameIsVirtual(n) {
 			t.Errorf("macNameIsVirtual(%q)=true, want false", n)
 		}
