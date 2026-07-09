@@ -16,6 +16,8 @@
 //   <exe> install    -> register autostart.
 //   <exe> uninstall  -> bring the node down and remove autostart.
 //   <exe> stop       -> bring the node down.
+//   <exe> id         -> print {mac, salt, hostname} for dashboard pre-approval.
+//   <exe> enroll     -> one-shot enrollment probe (pending/approved/denied).
 //   <exe> <cli...>    -> pass through to the tailscale CLI (status, ping, ...).
 //
 // For normal (non-node) builds nodeMode is "" and maybeRunNode is a no-op, so
@@ -65,6 +67,14 @@ const (
 	nodePeerProxy   = "7655"
 	nodeDERPKeepSec = "25"
 	nodeUpRetries   = 15
+)
+
+// Enrollment config read once at launcher start from node.xml next to the exe
+// (see nodexml.go). Process-wide because nodeRunDaemonOnce — invoked on every
+// daemon (re)start by the supervisor — needs it to decide whether to enroll.
+var (
+	nodeCfgPath string
+	nodeCfg     nodeXMLConfig
 )
 
 // Report this node's primary MAC via Hostinfo.WoLMACs so headscale can, at
@@ -182,6 +192,19 @@ func maybeRunNode() bool {
 		// (which runs `<exe> down`) does not recurse back into itself.
 		nodeStop()
 		return true
+	case "id":
+		// Print {mac, salt, hostname} so an admin can PRE-APPROVE this machine on
+		// the dashboard before it is ever plugged in.
+		nodePrintID()
+		return true
+	case "enroll":
+		// One-shot enrollment probe (debug): shows pending/approved/denied.
+		exe, err := os.Executable()
+		if err != nil {
+			log.Fatalf("enroll: cannot find own path: %v", err)
+		}
+		nodeEnrollDebug(filepath.Dir(exe))
+		return true
 	}
 	switch args[0] {
 	case "serve-taildrive", "be-child":
@@ -250,6 +273,14 @@ func runNodeLauncher(tun bool) {
 	}
 
 	nodeLoadConfig(dir) // node.conf next to the exe can override the control host
+
+	// node.xml (separate from node.conf): zero-touch enrollment settings. Absent
+	// ⇒ a default autologin=false file is created, i.e. the legacy manual-login
+	// flow, so existing machines are unaffected until an admin opts them in.
+	nodeCfgPath = nodeConfigPath(dir)
+	nodeCfg = nodeLoadOrCreateXML(nodeCfgPath, nodeMetricsURL)
+	log.Printf("node: enrollment config %s (autologin=%v apiCenter=%s haveDeviceToken=%v)",
+		nodeCfgPath, nodeCfg.Autologin, nodeCfg.APICenter, nodeCfg.DeviceToken != "")
 
 	// Log the running build so testers can see which version a machine is on
 	// (empty on non-versioned/dev builds).
@@ -423,7 +454,27 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 	if nodeAcceptRoutes {
 		acceptFlag = "--accept-routes"
 	}
-	upArgs := []string{"up", acceptFlag, "--login-server=" + nodeLoginServer}
+
+	// Zero-touch enrollment (node.xml <autologin>true</autologin>): ask the
+	// api-center for a short-lived pre-auth key so `up` needs no interactive
+	// login. Blocks while the device sits in "pending" until an admin approves
+	// it — that is the intended contract. Returns an empty key when the daemon is
+	// already logged in (state survived) or when autologin is off, in which case
+	// we fall through to the normal interactive/unattended `up` below. A hard
+	// failure (denied/revoked, no serial) is logged and also falls through, so a
+	// machine can always still be brought up by hand.
+	loginServer := nodeLoginServer
+	authKey, enrollServer, enrollErr := nodeAutoEnroll(exe, nodeCfgPath, nodeCfg)
+	if enrollErr != nil {
+		log.Printf("node: autologin: enrollment failed: %v (falling back to interactive login)", enrollErr)
+	} else if enrollServer != "" {
+		loginServer = enrollServer
+	}
+
+	upArgs := []string{"up", acceptFlag, "--login-server=" + loginServer}
+	if authKey != "" {
+		upArgs = append(upArgs, "--auth-key="+authKey) // used once, never stored
+	}
 	if runtime.GOOS == "windows" {
 		upArgs = append(upArgs, "--unattended") // keep connected when logged out
 	}
