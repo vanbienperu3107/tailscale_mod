@@ -46,6 +46,10 @@ type nodeEnrollRequest struct {
 	Salt     string `json:"salt"`
 	Hostname string `json:"hostname"`
 	Token    string `json:"token,omitempty"`
+	// Probe = "chỉ hỏi đã được adopt/duyệt chưa, đừng tạo dòng pending". Dùng bởi
+	// máy CHƯA bật autologin: nếu server trả 404 (chưa adopt) thì im lặng quay về
+	// đăng nhập tay; nếu 200 thì tự chuyển sang autologin.
+	Probe bool `json:"probe,omitempty"`
 }
 
 // nodeEnrollResponse is the api-center's reply. AuthKey/LoginServer are set on
@@ -71,6 +75,8 @@ const (
 	nodeEnrollOK
 	// nodeEnrollDenied: 403, revoked or wrong device token — STOP, never retry.
 	nodeEnrollDenied
+	// nodeEnrollNotFound: 404, a probe found no adopted/approved row — not enrolled.
+	nodeEnrollNotFound
 )
 
 func (o nodeEnrollOutcome) String() string {
@@ -81,6 +87,8 @@ func (o nodeEnrollOutcome) String() string {
 		return "ok"
 	case nodeEnrollDenied:
 		return "denied"
+	case nodeEnrollNotFound:
+		return "not-enrolled"
 	default:
 		return "retry"
 	}
@@ -140,6 +148,10 @@ func nodeEnrollOnce(client *http.Client, apiCenter string, req nodeEnrollRequest
 	case http.StatusForbidden:
 		_ = json.Unmarshal(raw, &out) // {"reason":"revoked"} etc.
 		return nodeEnrollDenied, out, nil
+	case http.StatusNotFound:
+		// Only a probe gets 404 ("not adopted yet"); a normal enroll never does.
+		_ = json.Unmarshal(raw, &out)
+		return nodeEnrollNotFound, out, nil
 	default:
 		snippet := string(raw)
 		if len(snippet) > 256 {
@@ -286,6 +298,66 @@ func nodeAutoEnroll(exe string, cfgPath string, cfg nodeXMLConfig) (authKey, log
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	return nodeEnroll(client, cfgPath, cfg)
+}
+
+// nodeProbeEnroll runs ONE opportunistic enrollment probe for a machine that is
+// NOT configured for autologin. If this machine was already adopted — it logged
+// in via OIDC before, so the dashboard holds an approved row keyed by (mac,salt)
+// — the api-center returns an auth key and we SELF-CONFIGURE: flip node.xml to
+// autologin=true and cache the device token, so every future start joins the
+// tailnet unattended with no manual step.
+//
+// Any other outcome (404 not adopted / pending / denied / error) returns no key,
+// and the caller falls back to the normal interactive OIDC login. Never blocks
+// in a loop — a single request with a short timeout.
+func nodeProbeEnroll(cfgPath string, cfg nodeXMLConfig) (authKey, loginServer string) {
+	if cfg.APICenter == "" {
+		return "", ""
+	}
+	mac, salt, hostname, err := nodeDeviceIdentity()
+	if err != nil {
+		log.Printf("node: probe-enroll: skipped (%v)", err)
+		return "", ""
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	return nodeProbeEnrollWith(client, cfgPath, cfg, mac, salt, hostname)
+}
+
+// nodeProbeEnrollWith is the testable core of nodeProbeEnroll with the device
+// identity injected (the real serial read is Windows-only, so tests supply it).
+func nodeProbeEnrollWith(client *http.Client, cfgPath string, cfg nodeXMLConfig, mac, salt, hostname string) (authKey, loginServer string) {
+	outcome, resp, oerr := nodeEnrollOnce(client, cfg.APICenter, nodeEnrollRequest{
+		Mac: mac, Salt: salt, Hostname: hostname, Token: cfg.DeviceToken, Probe: true,
+	})
+	if outcome != nodeEnrollOK {
+		switch outcome {
+		case nodeEnrollNotFound:
+			log.Printf("node: probe-enroll: not adopted yet — using interactive login")
+		case nodeEnrollDenied:
+			log.Printf("node: probe-enroll: denied (%s) — using interactive login", resp.Reason)
+		default:
+			log.Printf("node: probe-enroll: %s (%v) — using interactive login", outcome, oerr)
+		}
+		return "", ""
+	}
+
+	// Adopted: persist autologin + device token so future starts are unattended.
+	newCfg := cfg
+	newCfg.Autologin = true
+	if resp.DeviceToken != "" {
+		newCfg.DeviceToken = resp.DeviceToken
+	}
+	if werr := nodeWriteXML(cfgPath, newCfg); werr != nil {
+		log.Printf("node: probe-enroll: adopted but could not write %s: %v (still joining now)", cfgPath, werr)
+	} else {
+		log.Printf("node: probe-enroll: adopted — node.xml switched to autologin=true")
+	}
+	ls := resp.LoginServer
+	if ls == "" {
+		ls = nodeLoginServer
+	}
+	log.Printf("node: probe-enroll: joining unattended via adopted enrollment")
+	return resp.AuthKey, ls
 }
 
 // nodePrintID prints this machine's enrollment identity as JSON so an admin can
