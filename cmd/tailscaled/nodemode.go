@@ -471,6 +471,21 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 		loginServer = enrollServer
 	}
 
+	// Opportunistic auto-adopt: a machine NOT configured for autologin, but which
+	// logged in via OIDC before, was recorded 'approved' on the dashboard (keyed
+	// by mac+salt). If it still needs a login now (fresh state / reinstall), one
+	// probe reclaims an auth key and flips node.xml to autologin=true — so it
+	// rejoins unattended without anyone re-typing an OIDC URL. Only when the
+	// daemon actually needs login; a working node is never disturbed.
+	if authKey == "" && !nodeCfg.Autologin {
+		if st := nodeBackendState(exe); st == "NeedsLogin" || st == "NoState" {
+			if k, ls := nodeProbeEnroll(nodeCfgPath, nodeCfg); k != "" {
+				authKey = k
+				loginServer = ls
+			}
+		}
+	}
+
 	upArgs := []string{"up", acceptFlag, "--login-server=" + loginServer}
 	if authKey != "" {
 		upArgs = append(upArgs, "--auth-key="+authKey) // used once, never stored
@@ -867,11 +882,21 @@ func nodeRegisterDeviceIdentity(exe string) {
 		log.Printf("node: device-register: could not determine node key: %v", err)
 	}
 
+	// salt = normalized hardware serial. Sent so the dashboard can AUTO-ADOPT
+	// this machine (record an 'approved' enrollment) now that it has logged in —
+	// letting it rejoin unattended next time with no config. Best-effort: empty
+	// when the serial can't be read; the server just skips adoption then.
+	salt := ""
+	if serial, herr := machineHardwareID(); herr == nil {
+		salt = normalizeSerial(serial)
+	}
+
 	body, _ := json.Marshal(struct {
 		Mac      string `json:"mac"`
 		Hostname string `json:"hostname"`
 		NodeKey  string `json:"node_key"`
 		IPv4     string `json:"ipv4"`
+		Salt     string `json:"salt,omitempty"`
 		Version  string `json:"version,omitempty"`
 		Build    int    `json:"build,omitempty"`
 		Variant  string `json:"variant,omitempty"`
@@ -880,6 +905,7 @@ func nodeRegisterDeviceIdentity(exe string) {
 		Hostname: hostname,
 		NodeKey:  nodeKey,
 		IPv4:     ipv4,
+		Salt:     salt,
 		Version:  nodeVersion,
 		Build:    nodeCurrentBuild(),
 		Variant:  nodeVariant,

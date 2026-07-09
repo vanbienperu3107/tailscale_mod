@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -103,6 +104,12 @@ func TestNodeEnrollOnce(t *testing.T) {
 			},
 		},
 		{
+			name:   "404 -> not enrolled (probe found no adopted row)",
+			status: http.StatusNotFound,
+			body:   `{"status":"not_enrolled"}`,
+			want:   nodeEnrollNotFound,
+		},
+		{
 			name:    "500 -> transient, retry",
 			status:  http.StatusInternalServerError,
 			body:    `boom`,
@@ -175,6 +182,57 @@ func TestNodeEnrollOnceOmitsEmptyToken(t *testing.T) {
 	if _, present := m["token"]; present {
 		t.Errorf("empty token must be omitted from the request, got %s", body)
 	}
+}
+
+func TestNodeProbeEnrollWith(t *testing.T) {
+	writeCfg := func(t *testing.T) (string, nodeXMLConfig) {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "node.xml")
+		// Start from the default an un-adopted machine has: autologin OFF.
+		cfg := nodeXMLConfig{Autologin: false, APICenter: "PLACEHOLDER"}
+		if err := nodeWriteXML(path, cfg); err != nil {
+			t.Fatal(err)
+		}
+		return path, cfg
+	}
+
+	t.Run("adopted: writes key, flips node.xml to autologin=true + token", func(t *testing.T) {
+		path, cfg := writeCfg(t)
+		srv := enrollTestServer(t, http.StatusOK,
+			`{"authKey":"ak-adopt","deviceToken":"dt-new","loginServer":"https://hs.test"}`, nil)
+		cfg.APICenter = srv.URL
+
+		key, ls := nodeProbeEnrollWith(srv.Client(), path, cfg, "aa:bb", "SER1", "host1")
+		if key != "ak-adopt" {
+			t.Fatalf("authKey = %q, want ak-adopt", key)
+		}
+		if ls != "https://hs.test" {
+			t.Errorf("loginServer = %q", ls)
+		}
+		// node.xml must now be self-configured for unattended future starts.
+		got := nodeLoadOrCreateXML(path, "fallback")
+		if !got.Autologin {
+			t.Error("node.xml autologin should be flipped to true after adopt")
+		}
+		if got.DeviceToken != "dt-new" {
+			t.Errorf("deviceToken = %q, want dt-new", got.DeviceToken)
+		}
+	})
+
+	t.Run("not adopted (404): no key, node.xml untouched (stays autologin=false)", func(t *testing.T) {
+		path, cfg := writeCfg(t)
+		srv := enrollTestServer(t, http.StatusNotFound, `{"status":"not_enrolled"}`, nil)
+		cfg.APICenter = srv.URL
+
+		key, _ := nodeProbeEnrollWith(srv.Client(), path, cfg, "aa:bb", "SER1", "host1")
+		if key != "" {
+			t.Fatalf("authKey = %q, want empty (fall back to interactive login)", key)
+		}
+		if got := nodeLoadOrCreateXML(path, "fallback"); got.Autologin {
+			t.Error("node.xml must stay autologin=false when not adopted")
+		}
+	})
 }
 
 func TestNodeEnrollBackoff(t *testing.T) {
