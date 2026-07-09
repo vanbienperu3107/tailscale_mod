@@ -3817,6 +3817,13 @@ func (b *LocalBackend) initMachineKeyLocked() (err error) {
 		return nil
 	}
 
+	// TS_MACHINE_KEY_SEED, when set, makes the machine key DETERMINISTIC: it is
+	// derived from the seed rather than from OS randomness, so the same machine
+	// keeps the same identity (headscale node + pinned tailnet IP) across state
+	// wipes / reinstalls. The node launcher sets it from a stable hardware serial
+	// (see cmd/tailscaled/hwid.go). Empty ⇒ upstream random-key behavior.
+	seed := envknob.String("TS_MACHINE_KEY_SEED")
+
 	keyText, err := b.store.ReadState(ipn.MachineKeyStateKey)
 	if err == nil {
 		if err := b.machinePrivKey.UnmarshalText(keyText); err != nil {
@@ -3825,17 +3832,30 @@ func (b *LocalBackend) initMachineKeyLocked() (err error) {
 		if b.machinePrivKey.IsZero() {
 			return fmt.Errorf("invalid zero key stored in %v key of %v", ipn.MachineKeyStateKey, b.store)
 		}
+		// Drift detector: a stored key always wins over the seed (we never
+		// rewrite an existing identity), but if a seed is configured and the
+		// stored key does NOT match it, this node registered before the
+		// deterministic-key migration — its identity is not yet canonical and a
+		// one-time state wipe is needed to converge (see enrollment plan §7).
+		if seed != "" && !key.NewMachineFromSeed([]byte(seed)).Equal(b.machinePrivKey) {
+			b.logf("machine key: stored key predates TS_MACHINE_KEY_SEED; identity not canonical (wipe state once to converge on the deterministic key)")
+		}
 		return nil
 	}
 	if err != ipn.ErrStateNotExist {
 		return fmt.Errorf("error reading %v key of %v: %w", ipn.MachineKeyStateKey, b.store, err)
 	}
 
-	// If we didn't find one already on disk and the prefs already
-	// have a legacy machine key, use that. Otherwise generate a
-	// new one.
-	b.logf("generating new machine key")
-	b.machinePrivKey = key.NewMachine()
+	// No key on disk yet. If a deterministic seed is configured, derive the key
+	// from it so this machine reclaims its stable identity; otherwise generate a
+	// fresh random one (upstream behavior).
+	if seed != "" {
+		b.logf("generating deterministic machine key from TS_MACHINE_KEY_SEED")
+		b.machinePrivKey = key.NewMachineFromSeed([]byte(seed))
+	} else {
+		b.logf("generating new machine key")
+		b.machinePrivKey = key.NewMachine()
+	}
 
 	keyText, _ = b.machinePrivKey.MarshalText()
 	if err := ipn.WriteState(b.store, ipn.MachineKeyStateKey, keyText); err != nil {

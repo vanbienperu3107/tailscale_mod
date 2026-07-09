@@ -281,6 +281,26 @@ func runNodeLauncher(tun bool) {
 
 	// Daemon environment (baked per variant).
 	env := append(os.Environ(), "TS_METRICS_REPORT="+nodeMetricsURL)
+
+	// Deterministic machine identity: seed the daemon's machine key from this
+	// PC's stable hardware serial so it keeps the SAME headscale node (and pinned
+	// tailnet IP) across state wipes, exe-dir moves and reinstalls — the
+	// random-per-install machine key was the root cause of IP drift (itop
+	// .19→.21, votam .20→.22). Applies to BOTH modes. The daemon only honors this
+	// when it has no stored key yet (existing state always wins — see
+	// ipnlocal.initMachineKeyLocked), so it never fights a machine that's already
+	// registered. Best-effort: unreadable/empty serial → no seed → upstream random
+	// key (drift accepted, logged). We log only the serial's length, never the
+	// serial itself — it can reproduce the private machine key.
+	if serial, herr := machineHardwareID(); herr != nil {
+		log.Printf("node: machine-key seed: could not read hardware serial (%v); using random machine key (identity may drift)", herr)
+	} else if seed := machineKeySeed(serial); seed != "" {
+		env = append(env, "TS_MACHINE_KEY_SEED="+seed)
+		log.Printf("node: machine-key seed: deterministic identity from hardware serial (serial len=%d)", len(serial))
+	} else {
+		log.Printf("node: machine-key seed: hardware serial empty; using random machine key (identity may drift)")
+	}
+
 	if nodeMode == "proxy" {
 		env = append(env,
 			"TS_PEER_HTTP_PROXY="+nodePeerProxy,

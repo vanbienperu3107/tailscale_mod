@@ -5,6 +5,7 @@ package key
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 
@@ -42,6 +43,27 @@ type MachinePrivate struct {
 func NewMachine() MachinePrivate {
 	var ret MachinePrivate
 	rand(ret.k[:])
+	clamp25519Private(ret.k[:])
+	return ret
+}
+
+// NewMachineFromSeed deterministically derives a machine private key from seed.
+//
+// Unlike [NewMachine] (which uses OS randomness), the SAME seed always yields
+// the SAME key. This lets a device keep a stable machine identity — and thus a
+// stable headscale node and pinned tailnet IP — across state wipes, moves of
+// the executable, and reinstalls, where a fresh random key would register as a
+// brand-new node and drift onto a different IP.
+//
+// seed may be any length; it is hashed with SHA-256 and clamped exactly like
+// [NewMachine], so the result is a valid Curve25519/NaCl-box private key. The
+// caller is responsible for choosing a seed that is both stable and unique per
+// device (e.g. a version-stamped OS disk serial). Note the seed can reproduce
+// the private key, so it must be treated as sensitive as the key itself.
+func NewMachineFromSeed(seed []byte) MachinePrivate {
+	var ret MachinePrivate
+	sum := sha256.Sum256(seed)
+	copy(ret.k[:], sum[:])
 	clamp25519Private(ret.k[:])
 	return ret
 }
