@@ -39,7 +39,7 @@ jobs:
         run: |
           set -eu
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
-          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed'
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed|NodeXML|NodeEnroll'
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
           # Deterministic machine key (seed → stable identity, no IP drift).
           go test -v -run 'MachineFromSeed|MachineKey' ./types/key/
