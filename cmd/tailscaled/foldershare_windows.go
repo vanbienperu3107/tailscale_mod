@@ -34,6 +34,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -233,6 +234,12 @@ func nodeRunNetDirect(tok windows.Token, args []string) (string, error) {
 // pinned to winsta0\default so WNetAddConnection2's SHCNE_DRIVEADD broadcast
 // reaches the user's Explorer (auto-refreshing This PC).
 func nodeCreateProcessWithToken(tok windows.Token, appName, cmdLine string, stdHandle *windows.Handle) (uint32, error) {
+	// CreateProcessWithTokenW needs SeImpersonatePrivilege ENABLED on the caller.
+	// Elevated admins hold it but it starts disabled — enable it or the call
+	// returns ERROR_ACCESS_DENIED. Best-effort; the call itself reports the real
+	// error if this didn't help.
+	nodeEnableImpersonateOnce()
+
 	appName16, err := windows.UTF16PtrFromString(appName)
 	if err != nil {
 		return 1, err
@@ -386,6 +393,44 @@ func nodeShellUserToken() (windows.Token, error) {
 		return 0, fmt.Errorf("DuplicateTokenEx(explorer): %w", err)
 	}
 	return primary, nil
+}
+
+var nodeImpersonateOnce sync.Once
+
+// nodeEnableImpersonateOnce enables SeImpersonatePrivilege on this process's
+// token once, so CreateProcessWithTokenW stops returning ERROR_ACCESS_DENIED.
+// Best-effort and idempotent.
+func nodeEnableImpersonateOnce() {
+	nodeImpersonateOnce.Do(func() {
+		if err := nodeEnablePrivilege("SeImpersonatePrivilege"); err != nil {
+			log.Printf("node: folder-mount: could not enable SeImpersonatePrivilege (%v); user-session mount may fail with Access denied", err)
+		}
+	})
+}
+
+// nodeEnablePrivilege enables a named privilege on the current process token.
+func nodeEnablePrivilege(name string) error {
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(),
+		windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &tok); err != nil {
+		return fmt.Errorf("OpenProcessToken: %w", err)
+	}
+	defer tok.Close()
+
+	n16, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return err
+	}
+	var luid windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, n16, &luid); err != nil {
+		return fmt.Errorf("LookupPrivilegeValue(%s): %w", name, err)
+	}
+	tp := windows.Tokenprivileges{PrivilegeCount: 1}
+	tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
+	if err := windows.AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil); err != nil {
+		return fmt.Errorf("AdjustTokenPrivileges(%s): %w", name, err)
+	}
+	return nil
 }
 
 func nodeWTSGetActiveConsoleSessionId() uint32 {
