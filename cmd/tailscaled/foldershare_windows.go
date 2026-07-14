@@ -44,6 +44,8 @@ var (
 	procCreateProcessWithTokenW      = syscall.NewLazyDLL("advapi32.dll").NewProc("CreateProcessWithTokenW")
 	procWTSQueryUserToken            = syscall.NewLazyDLL("wtsapi32.dll").NewProc("WTSQueryUserToken")
 	procWTSGetActiveConsoleSessionId = syscall.NewLazyDLL("kernel32.dll").NewProc("WTSGetActiveConsoleSessionId")
+	procGetShellWindow               = syscall.NewLazyDLL("user32.dll").NewProc("GetShellWindow")
+	procGetWindowThreadProcessId     = syscall.NewLazyDLL("user32.dll").NewProc("GetWindowThreadProcessId")
 )
 
 // nodeCurrentTokenEnv observes this process's security context for
@@ -124,19 +126,16 @@ func nodeRunNetInProcess(args []string) (string, error) {
 func nodeInteractiveUserToken(src nodeMountTokenSource) (windows.Token, func(), error) {
 	switch src {
 	case nodeMountTokenLinked:
-		linked, err := windows.GetCurrentProcessToken().GetLinkedToken()
+		// Borrow the interactive user's token from explorer.exe. We can NOT use
+		// GetLinkedToken here: a non-SYSTEM elevated admin lacks SeTcbPrivilege,
+		// so TokenLinkedToken comes back at SecurityIdentification level, which
+		// DuplicateTokenEx/CreateProcessWithTokenW reject with
+		// ERROR_BAD_IMPERSONATION_LEVEL. explorer runs as the same user
+		// non-elevated, and a higher-integrity process may open a same-user
+		// lower-integrity process' token, so we duplicate its full primary token.
+		primary, err := nodeShellUserToken()
 		if err != nil {
-			return 0, nil, fmt.Errorf("GetLinkedToken: %w", err)
-		}
-		// desiredAccess 0 => duplicate with the same access the linked token
-		// carries (matches util/winutil/s4u's proven idiom); TokenPrimary is
-		// required because the linked token is an impersonation token and
-		// CreateProcessWithTokenW needs a primary one.
-		var primary windows.Token
-		err = windows.DuplicateTokenEx(linked, 0, nil, windows.SecurityImpersonation, windows.TokenPrimary, &primary)
-		linked.Close()
-		if err != nil {
-			return 0, nil, fmt.Errorf("DuplicateTokenEx: %w", err)
+			return 0, nil, err
 		}
 		return primary, func() { primary.Close() }, nil
 	case nodeMountTokenActiveSession:
@@ -352,6 +351,41 @@ func nodeComposeCmdLine(args []string) string {
 		parts[i] = syscall.EscapeArg(a)
 	}
 	return strings.Join(parts, " ")
+}
+
+// nodeShellUserToken returns a primary token for the interactive user by
+// duplicating the token of their explorer.exe (the shell), found via
+// GetShellWindow. This is the standard "run as the logged-on non-elevated user
+// from an elevated process" technique and, unlike GetLinkedToken, needs no
+// SeTcbPrivilege — only same-user process access + SeImpersonatePrivilege
+// (held by elevated admins) for the later CreateProcessWithTokenW. Caller closes.
+func nodeShellUserToken() (windows.Token, error) {
+	hwnd, _, _ := procGetShellWindow.Call()
+	if hwnd == 0 {
+		return 0, fmt.Errorf("GetShellWindow: no interactive shell (no user logged on to this session)")
+	}
+	var pid uint32
+	procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	if pid == 0 {
+		return 0, fmt.Errorf("GetWindowThreadProcessId: no shell pid")
+	}
+	hProc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return 0, fmt.Errorf("OpenProcess(explorer pid %d): %w", pid, err)
+	}
+	defer windows.CloseHandle(hProc)
+
+	var hTok windows.Token
+	if err := windows.OpenProcessToken(hProc, windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY, &hTok); err != nil {
+		return 0, fmt.Errorf("OpenProcessToken(explorer): %w", err)
+	}
+	defer hTok.Close()
+
+	var primary windows.Token
+	if err := windows.DuplicateTokenEx(hTok, 0, nil, windows.SecurityImpersonation, windows.TokenPrimary, &primary); err != nil {
+		return 0, fmt.Errorf("DuplicateTokenEx(explorer): %w", err)
+	}
+	return primary, nil
 }
 
 func nodeWTSGetActiveConsoleSessionId() uint32 {
