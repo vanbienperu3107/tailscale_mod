@@ -74,6 +74,12 @@ type nodeMountStatus struct {
 	Drive   string `json:"drive,omitempty"`
 	OK      bool   `json:"ok"`
 	Error   string `json:"error,omitempty"`
+	// Warning carries a non-fatal caveat about a mount that technically
+	// succeeded but may not be usable yet — currently "mapped only in the
+	// elevated session, reboot pending" (see nodeMountStatusFor). omitempty so
+	// the headscale foldershare-status endpoint and the dashboard stay
+	// backward-compatible with builds that never send it.
+	Warning string `json:"warning,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -384,59 +390,336 @@ var dashboardSecretKnob = envknob.RegisterString("TS_DASHBOARD_SECRET")
 // can detect "already correct" (skip) vs. "grant revoked" (unmount).
 var nodeMountedDrives = map[string]string{}
 
-// nodeReconcileMounts makes this node's mapped drives match desired. No-op on
-// non-Windows (drive-letter mounting is a Windows concept; other platforms
-// would use `tailscale drive` peer access directly or a WebDAV client).
-// Returns one nodeMountStatus per desired mount (ok=true if mounted, ok=false
-// + error — e.g. "System error 67" — if resolve/mount failed) for the
-// dashboard. nil on non-Windows (feature not applicable).
+// nodeMountSource remembers WHICH security context a drive was mounted in
+// (drive letter -> token source), so the unmount runs in the SAME session the
+// mount was created in. A `net use /delete` in the wrong token targets the
+// wrong DosDevices namespace and orphans the user's drive. Parallel to
+// nodeMountedDrives; both are cleaned up together on unmount.
+var nodeMountSource = map[string]nodeMountTokenSource{}
+
+// nodeMountsSupported gates the whole grantee-side mount feature to Windows
+// (drive-letter mapping is a Windows concept). A var, not a direct
+// runtime.GOOS check, so nodeReconcileMounts can be exercised on the Linux CI
+// runner by flipping it true and injecting the exec seams below.
+var nodeMountsSupported = runtime.GOOS == "windows"
+
+// nodeMountTokenSource is the security context `net use` runs in. The elevated
+// daemon (requireAdministrator manifest) must NOT map drives in its own token
+// — those land in the admin logon token's namespace, invisible to the
+// interactive non-elevated Explorer (UAC "linked connections" isolation, the
+// "net use shows Z: but Explorer doesn't" bug). Instead it mounts into the
+// user's session; this enum records which route was used, both to unmount
+// symmetrically and to report honest visibility to the dashboard.
+type nodeMountTokenSource int
+
+const (
+	// nodeMountTokenCurrent: plain in-process `net use` (this process's token).
+	// Visible to the user ONLY if we're already non-elevated, or if
+	// EnableLinkedConnections is in effect this session.
+	nodeMountTokenCurrent nodeMountTokenSource = iota
+	// nodeMountTokenLinked: spawn `net use` under the elevated token's linked
+	// (filtered, non-elevated) sibling — same logon session as Explorer, so the
+	// mapping shows up immediately. The normal path for the elevated-user daemon.
+	nodeMountTokenLinked
+	// nodeMountTokenActiveSession: spawn `net use` under the active console
+	// user's token (WTSQueryUserToken). Only reachable when running as SYSTEM.
+	nodeMountTokenActiveSession
+)
+
+// nodeTokenEnv is the observed security context of this process, gathered by
+// the platform-specific nodeCurrentTokenEnv. Pure inputs so
+// nodeSelectMountTokenSource is unit-testable without Windows.
+type nodeTokenEnv struct {
+	Elevated        bool // this process token is UAC-elevated (full admin)
+	HaveLinkedToken bool // GetLinkedToken succeeded (a split-token user)
+	LinkedElevated  bool // the linked token is itself elevated => WE are the non-elevated one
+	IsSystem        bool // running as LocalSystem (S-1-5-18)
+	HaveConsoleUser bool // an interactive user is logged on to the console session
+}
+
+// nodeSelectMountTokenSource picks the context to run `net use` in. Pure.
+func nodeSelectMountTokenSource(e nodeTokenEnv) nodeMountTokenSource {
+	switch {
+	case e.IsSystem && e.HaveConsoleUser:
+		// A SYSTEM service must reach into the logged-on user's session.
+		return nodeMountTokenActiveSession
+	case e.Elevated && e.HaveLinkedToken && !e.LinkedElevated:
+		// We're the elevated half of a split token; the linked token is the
+		// non-elevated sibling in the same session as Explorer.
+		return nodeMountTokenLinked
+	default:
+		// Already non-elevated (mapping is directly visible), or no linked token
+		// to reach (e.g. UAC off / built-in Administrator — no isolation anyway).
+		return nodeMountTokenCurrent
+	}
+}
+
+// nodeMountVisibleToUser reports whether a mount made via src will actually
+// show up in the interactive user's Explorer. userIsolated means this process
+// is elevated AND has a non-elevated linked sibling — i.e. a real UAC split
+// token where an in-process `net use` lands in a namespace the user can't see.
+// Pure — drives the honest status.
+func nodeMountVisibleToUser(src nodeMountTokenSource, userIsolated, linkedConnEffective bool) bool {
+	switch src {
+	case nodeMountTokenLinked, nodeMountTokenActiveSession:
+		return true // mapped directly into the user's session
+	default:
+		// Plain in-process net use: visible unless a real split-token isolates
+		// us from the user and linked connections aren't in effect.
+		// (Non-elevated, or built-in Administrator / UAC-off with no token
+		// split, has userIsolated=false — no isolation to defeat.)
+		return !userIsolated || linkedConnEffective
+	}
+}
+
+// nodeTokenSourceName is a short label for logs. Pure.
+func nodeTokenSourceName(s nodeMountTokenSource) string {
+	switch s {
+	case nodeMountTokenLinked:
+		return "linked-user"
+	case nodeMountTokenActiveSession:
+		return "active-session"
+	default:
+		return "current"
+	}
+}
+
+func nodeMountArgv(drive, unc string) []string {
+	return []string{"use", drive, unc, "/PERSISTENT:NO"}
+}
+
+func nodeUnmountArgv(drive string) []string {
+	return []string{"use", drive, "/delete", "/y"}
+}
+
+func nodeListMountsArgv() []string {
+	return []string{"use"}
+}
+
+// nodeParseNetUseTable parses `net use` output into drive-letter -> remote UNC.
+// Only rows with an "X:" device and a "\\..." remote are kept; status columns
+// (OK/Disconnected/Unavailable), headers, and the trailing "command completed"
+// line are ignored. Pure — unit-tested without Windows. Tolerant of the leading
+// status word ("OK  Z:  \\...") and of a missing status ("Z:  \\...").
+func nodeParseNetUseTable(out string) map[string]string {
+	res := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if len(f) == 2 && f[1] == ':' && f[0] >= 'A' && f[0] <= 'Z' {
+				// The remote is the next field that starts with "\\".
+				for _, g := range fields[i+1:] {
+					if strings.HasPrefix(g, `\\`) {
+						res[strings.ToUpper(f)] = g
+						break
+					}
+				}
+				break
+			}
+		}
+	}
+	return res
+}
+
+// nodeUNCMatch reports whether two UNC strings refer to the same share,
+// ignoring case and trailing separators — `net use` may echo a path back with
+// different casing than we mapped it. Pure.
+func nodeUNCMatch(a, b string) bool {
+	norm := func(s string) string {
+		return strings.TrimRight(strings.ToLower(strings.TrimSpace(s)), `\/`)
+	}
+	return a != "" && norm(a) == norm(b)
+}
+
+// nodeIsAlreadyMappedErr reports whether a `net use` failure is the "local
+// device name already in use" family (System error 85 / 1219). After a daemon
+// restart the in-memory nodeMountedDrives is empty but the user-session mapping
+// survives, so re-issuing `net use <pinned letter>` fails this way for a drive
+// that is in fact already correct — a false failure, not a real one. Pure.
+func nodeIsAlreadyMappedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "error 85") || strings.Contains(s, "error 1219") ||
+		strings.Contains(s, "already in use") || strings.Contains(s, "multiple connections")
+}
+
+// nodeMountStatusFor builds the per-mount status reported to the dashboard,
+// enforcing the "no misleading green / no false red" rule. Pure so the policy
+// is unit-tested off-Windows.
+//
+//   - mountErr set                -> OK=false, Error=mountErr (a real failure wins).
+//   - drive empty                 -> OK=false, Error="not mounted" (no free letter).
+//   - mounted & visible to user   -> OK=true.
+//   - mounted but NOT visible yet  -> OK=false + a human Error (never OK=false with
+//     an empty Error, which the dashboard would render as an unexplained red).
+func nodeMountStatusFor(m nodeMountDesired, drive, mountErr string,
+	src nodeMountTokenSource, userIsolated, linkedConnEffective bool) nodeMountStatus {
+	st := nodeMountStatus{Share: m.Share, Machine: m.Machine, Drive: drive}
+	switch {
+	case mountErr != "":
+		st.Drive = m.Drive // desired letter; the mount didn't take
+		st.OK = false
+		st.Error = mountErr
+	case drive == "":
+		st.Drive = m.Drive
+		st.OK = false
+		st.Error = "not mounted"
+	case nodeMountVisibleToUser(src, userIsolated, linkedConnEffective):
+		st.OK = true
+	default:
+		st.OK = false
+		msg := "đã map ở phiên elevated; cần reboot để ổ hiện trong Explorer (EnableLinkedConnections)"
+		st.Error = msg
+		st.Warning = msg
+	}
+	return st
+}
+
+// The three exec seams below are vars (like nodeNextFreeDriveLetter) so tests
+// can inject fakes and drive nodeReconcileMounts on a non-Windows CI runner.
+// Their default bodies delegate to the platform-specific nodeRunNetUseVia /
+// nodeCurrentMountSource / nodeMountEnv (real on Windows, stubs elsewhere).
+
+// nodeMountDrive maps drive->unc and returns the token source actually used
+// (needed later to unmount in the same session and to report honest status).
+var nodeMountDrive = func(drive, unc string) (nodeMountTokenSource, error) {
+	src := nodeCurrentMountSource()
+	_, err := nodeRunNetUseVia(src, nodeMountArgv(drive, unc))
+	return src, err
+}
+
+// nodeUnmountDrive removes a mapping in the SAME session it was created in
+// (src is the value stored in nodeMountSource at mount time).
+var nodeUnmountDrive = func(drive string, src nodeMountTokenSource) error {
+	_, err := nodeRunNetUseVia(src, nodeUnmountArgv(drive))
+	return err
+}
+
+// nodeListUserMounts returns the drive-letter -> UNC map currently visible in
+// the session we mount into, plus the source used to read it. Used to ADOPT
+// mappings that survived a daemon restart so we don't re-`net use` a live
+// pinned letter (System error 85) forever.
+var nodeListUserMounts = func() (map[string]string, nodeMountTokenSource, error) {
+	src := nodeCurrentMountSource()
+	out, err := nodeRunNetUseVia(src, nodeListMountsArgv())
+	if err != nil {
+		return nil, src, err
+	}
+	return nodeParseNetUseTable(out), src, nil
+}
+
+// nodeMountEnvFn reports (userIsolated, linkedConnEffective) for honest status:
+// userIsolated = elevated with a non-elevated linked sibling (in-process net
+// use would be hidden from the user); linkedConnEffective = EnableLinked
+// Connections is actually in force this session. A var for test injection;
+// default delegates to the platform impl (both false off-Windows).
+var nodeMountEnvFn = func() (userIsolated, linkedConnEffective bool) {
+	return nodeMountEnv()
+}
+
+// nodeLinkedConnNeedsReboot is set by nodeEnsureLinkedConnections (Windows)
+// when it just wrote EnableLinkedConnections=1, which only takes effect after a
+// reboot. Surfaced in a log line by the daemon wire-up so an admin knows a
+// one-time reboot is pending for the fallback (in-process) mount path.
+var nodeLinkedConnNeedsReboot bool
+
+// nodeReconcileMounts makes this node's mapped drives match desired. No-op when
+// nodeMountsSupported is false (drive-letter mounting is a Windows concept;
+// other platforms would use `tailscale drive` peer access directly or a WebDAV
+// client). Returns one nodeMountStatus per desired mount, with OK reflecting
+// whether the interactive user can actually SEE the drive (not merely that
+// `net use` returned 0). nil when unsupported (feature not applicable).
 func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStatus {
-	if runtime.GOOS != "windows" {
+	if !nodeMountsSupported {
 		return nil
 	}
+
+	userIsolated, linkedConnEff := nodeMountEnvFn()
+
+	// Resolve every owner IP to its Taildrive peer short name + tailnet suffix
+	// ONCE per pass (a single `tailscale status --json`), shared by adoption and
+	// mounting below. A resolve failure surfaces per-owner as a mount error.
+	peers, suffix, resolveErr := nodeResolveDrivePeers(exe)
+	uncFor := func(m nodeMountDesired) string {
+		short, ok := peers[m.OwnerIP]
+		if !ok || !nodeValidMountShare(m.Share) {
+			return ""
+		}
+		return nodeDriveMountUNC(suffix, short, m.Share)
+	}
+
+	// ADOPT: a daemon restart (routine on this auto-updating fleet) clears the
+	// in-memory maps while the user-session mappings survive. Re-derive them from
+	// the live `net use` table so a desired mount already mapped to its target
+	// UNC is recognized as "already correct" instead of being re-mounted onto a
+	// pinned letter (System error 85) every 20s forever — and so
+	// nodeNextFreeDriveLetter (which os.Stat's in the elevated token and can't
+	// see user-session maps) doesn't hand back a letter already in use there.
+	nodeAdoptExistingMounts(desired, uncFor)
 
 	toMount, toUnmount := nodePlanMounts(desired, nodeMountedDrives, nodeNextFreeDriveLetter)
 
 	for _, drive := range toUnmount {
-		if err := nodeUnmountDrive(drive); err != nil {
+		src := nodeMountSource[drive] // delete in the same session it was created
+		if err := nodeUnmountDrive(drive, src); err != nil {
 			log.Printf("node: folder-mount: unmount %s failed: %v", drive, err)
 			continue
 		}
 		log.Printf("node: folder-mount: unmounted %s", drive)
 		delete(nodeMountedDrives, drive)
+		delete(nodeMountSource, drive)
 	}
-	// key ("machine|share") -> error text of this pass's mount attempt.
+
+	// key ("machine|share") -> error text / token source of this pass's attempt.
 	mountErr := make(map[string]string)
+	mountSrc := make(map[string]nodeMountTokenSource)
 	for _, m := range toMount {
 		if !nodeValidMountShare(m.Share) {
 			// Unlike Drive (already normalized in nodePlanMounts), Share
-			// reaches here straight from the dashboard's JSON with no
-			// charset check — reject anything that could break out of the
-			// intended <tailnet>\<peer>\<share> UNC structure before it ever
-			// reaches fmt.Sprintf/net use.
+			// reaches here straight from the dashboard's JSON with no charset
+			// check — reject anything that could break out of the intended
+			// <tailnet>\<peer>\<share> UNC structure before it ever reaches
+			// fmt.Sprintf/net use.
 			mountErr[m.Key] = "invalid share name"
 			log.Printf("node: folder-mount: rejecting mount with invalid share name %q", m.Share)
 			continue
 		}
-		shortName, suffix, err := nodeResolveDrivePeer(exe, m.OwnerIP)
-		if err != nil {
-			mountErr[m.Key] = "resolve peer " + m.OwnerIP + ": " + err.Error()
-			log.Printf("node: folder-mount: resolve peer %s failed: %v", m.OwnerIP, err)
+		unc := uncFor(m)
+		if unc == "" {
+			e := "resolve peer " + m.OwnerIP
+			if resolveErr != nil {
+				e += ": " + resolveErr.Error()
+			} else {
+				e += ": not found in netmap"
+			}
+			mountErr[m.Key] = e
+			log.Printf("node: folder-mount: %s", e)
 			continue
 		}
-		unc := nodeDriveMountUNC(suffix, shortName, m.Share)
-		if err := nodeMountDrive(m.Drive, unc); err != nil {
+		src, err := nodeMountDrive(m.Drive, unc)
+		if err != nil && nodeIsAlreadyMappedErr(err) {
+			// The pinned letter is already mapped in the user session (survived a
+			// restart and adoption missed it, e.g. a UNC-format quirk); treat as
+			// already-correct rather than a false failure.
+			log.Printf("node: folder-mount: %s already mapped (adopting) -> %s", m.Drive, unc)
+			err = nil
+		}
+		if err != nil {
 			mountErr[m.Key] = err.Error()
 			log.Printf("node: folder-mount: mount %s -> %s failed: %v", m.Drive, unc, err)
 			continue
 		}
 		log.Printf("node: folder-mount: mounted %s -> %s", m.Drive, unc)
 		nodeMountedDrives[m.Drive] = m.Key
+		nodeMountSource[m.Drive] = src
+		mountSrc[m.Key] = src
 	}
 
-	// Report per desired mount: OK if it now holds a drive letter and had no
-	// error this pass; else surface the error (or "not mounted" if it never
-	// got a letter — e.g. none free).
+	// Report per desired mount via nodeMountStatusFor so OK means "the user can
+	// see the drive", surfacing a reboot/elevated-session caveat instead of a
+	// misleading green when it was only mapped in the elevated token.
 	var st []nodeMountStatus
 	for _, m := range desired {
 		if m.OwnerIP == "" || m.Share == "" {
@@ -444,16 +727,51 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStat
 		}
 		key := m.Machine + "|" + m.Share
 		drive := nodeDriveForKey(nodeMountedDrives, key)
-		switch {
-		case mountErr[key] != "":
-			st = append(st, nodeMountStatus{Share: m.Share, Machine: m.Machine, Drive: m.Drive, OK: false, Error: mountErr[key]})
-		case drive != "":
-			st = append(st, nodeMountStatus{Share: m.Share, Machine: m.Machine, Drive: drive, OK: true})
-		default:
-			st = append(st, nodeMountStatus{Share: m.Share, Machine: m.Machine, Drive: m.Drive, OK: false, Error: "not mounted"})
+		src, ok := mountSrc[key]
+		if !ok {
+			src = nodeMountSource[drive] // adopted / already-mounted before this pass
 		}
+		st = append(st, nodeMountStatusFor(m, drive, mountErr[key], src, userIsolated, linkedConnEff))
 	}
 	return st
+}
+
+// nodeAdoptExistingMounts seeds nodeMountedDrives/nodeMountSource from the live
+// user-session `net use` table for any desired mount already mapped to its
+// target UNC (uncFor(m)), so a post-restart reconcile treats it as
+// already-correct. Best-effort: a listing error just means no adoption this
+// pass and the mount loop's nodeIsAlreadyMappedErr fallback still guards pinned
+// letters.
+func nodeAdoptExistingMounts(desired []nodeMountDesired, uncFor func(nodeMountDesired) string) {
+	live, src, err := nodeListUserMounts()
+	if err != nil {
+		log.Printf("node: folder-mount: could not list existing mounts for adoption: %v", err)
+		return
+	}
+	for _, m := range desired {
+		if m.OwnerIP == "" || m.Share == "" {
+			continue
+		}
+		key := m.Machine + "|" + m.Share
+		if nodeDriveForKey(nodeMountedDrives, key) != "" {
+			continue // already tracked
+		}
+		want := uncFor(m)
+		if want == "" {
+			continue
+		}
+		for drive, unc := range live {
+			if _, taken := nodeMountedDrives[drive]; taken {
+				continue
+			}
+			if nodeUNCMatch(unc, want) {
+				nodeMountedDrives[drive] = key
+				nodeMountSource[drive] = src
+				log.Printf("node: folder-mount: adopted existing mount %s -> %s", drive, unc)
+				break
+			}
+		}
+	}
 }
 
 // driveMountPlan is one drive-letter assignment nodePlanMounts decided on.
@@ -605,32 +923,34 @@ type nodeStatusForDrive struct {
 	} `json:"Peer"`
 }
 
-// nodeResolveDrivePeer finds the peer with the given Tailscale IP in this
-// node's current netmap and returns (peer short name, tailnet MagicDNS
-// suffix without trailing dot). The short name is DNSName's first label,
-// which is what Taildrive's WebDAV path uses for the peer segment (see
+// nodeResolveDrivePeers fetches the netmap once and returns ownerIP -> peer
+// Taildrive short name for every peer, plus the tailnet MagicDNS suffix (no
+// trailing dot). The short name is DNSName's first label, which is what
+// Taildrive's WebDAV path uses for the peer segment (see
 // tailcfg.Node.DisplayName/ComputedName) — NOT the dashboard's self-reported
-// hostname, which can diverge (rename, dedup suffix).
-func nodeResolveDrivePeer(exe, ownerIP string) (shortName, tailnetSuffix string, err error) {
+// hostname, which can diverge (rename, dedup suffix). A reconcile pass with
+// several mounts runs `status --json` a single time instead of once per owner.
+// Returns a nil map + error if status can't be read/decoded. A var so tests can
+// drive nodeReconcileMounts without a live daemon.
+var nodeResolveDrivePeers = func(exe string) (byIP map[string]string, tailnetSuffix string, err error) {
 	c := exec.Command(exe, "status", "--json")
 	c.Env = append(os.Environ(), "TS_BE_CLI=1")
 	out, err := c.Output()
 	if err != nil {
-		return "", "", fmt.Errorf("status --json: %w", err)
+		return nil, "", fmt.Errorf("status --json: %w", err)
 	}
 	var st nodeStatusForDrive
 	if err := json.Unmarshal(out, &st); err != nil {
-		return "", "", fmt.Errorf("decode status: %w", err)
+		return nil, "", fmt.Errorf("decode status: %w", err)
 	}
-	suffix := strings.TrimSuffix(st.MagicDNSSuffix, ".")
+	byIP = make(map[string]string)
 	for _, p := range st.Peer {
+		short := nodeDNSShortName(p.DNSName)
 		for _, ip := range p.TailscaleIPs {
-			if ip == ownerIP {
-				return nodeDNSShortName(p.DNSName), suffix, nil
-			}
+			byIP[ip] = short
 		}
 	}
-	return "", "", fmt.Errorf("peer with IP %s not found in netmap", ownerIP)
+	return byIP, strings.TrimSuffix(st.MagicDNSSuffix, "."), nil
 }
 
 // nodeDNSShortName reduces a FQDN like "mylaptop.tailxyz.ts.net." to its
@@ -641,24 +961,6 @@ func nodeDNSShortName(fqdn string) string {
 		s = s[:i]
 	}
 	return s
-}
-
-func nodeMountDrive(drive, unc string) error {
-	c := exec.Command("net", "use", drive, unc, "/PERSISTENT:NO")
-	out, err := c.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func nodeUnmountDrive(drive string) error {
-	c := exec.Command("net", "use", drive, "/delete", "/y")
-	out, err := c.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
