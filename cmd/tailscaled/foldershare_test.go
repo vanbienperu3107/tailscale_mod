@@ -572,7 +572,7 @@ func TestFolderShareAdoptExistingMounts(t *testing.T) {
 		return map[string]string{"Z:": unc}, nodeMountTokenLinked, nil
 	}
 	desired := []nodeMountDesired{{Machine: "itop", OwnerIP: "100.64.0.19", Share: "test", Drive: "Z:"}}
-	uncFor := func(m nodeMountDesired) string { return unc }
+	uncFor := func(ownerIP, share string) string { return unc }
 
 	nodeAdoptExistingMounts(desired, uncFor)
 	if nodeMountedDrives["Z:"] != "itop|test" {
@@ -584,7 +584,7 @@ func TestFolderShareAdoptExistingMounts(t *testing.T) {
 
 	// A UNC mismatch must NOT adopt.
 	resetMaps()
-	uncMismatch := func(m nodeMountDesired) string { return nodeDriveMountUNC("ts.net", "itop", "other") }
+	uncMismatch := func(ownerIP, share string) string { return nodeDriveMountUNC("ts.net", "itop", "other") }
 	nodeAdoptExistingMounts(desired, uncMismatch)
 	if len(nodeMountedDrives) != 0 {
 		t.Errorf("mismatched UNC must not adopt, got %v", nodeMountedDrives)

@@ -642,12 +642,12 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStat
 	// ONCE per pass (a single `tailscale status --json`), shared by adoption and
 	// mounting below. A resolve failure surfaces per-owner as a mount error.
 	peers, suffix, resolveErr := nodeResolveDrivePeers(exe)
-	uncFor := func(m nodeMountDesired) string {
-		short, ok := peers[m.OwnerIP]
-		if !ok || !nodeValidMountShare(m.Share) {
+	uncFor := func(ownerIP, share string) string {
+		short, ok := peers[ownerIP]
+		if !ok || !nodeValidMountShare(share) {
 			return ""
 		}
-		return nodeDriveMountUNC(suffix, short, m.Share)
+		return nodeDriveMountUNC(suffix, short, share)
 	}
 
 	// ADOPT: a daemon restart (routine on this auto-updating fleet) clears the
@@ -686,7 +686,7 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStat
 			log.Printf("node: folder-mount: rejecting mount with invalid share name %q", m.Share)
 			continue
 		}
-		unc := uncFor(m)
+		unc := uncFor(m.OwnerIP, m.Share)
 		if unc == "" {
 			e := "resolve peer " + m.OwnerIP
 			if resolveErr != nil {
@@ -742,7 +742,7 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStat
 // already-correct. Best-effort: a listing error just means no adoption this
 // pass and the mount loop's nodeIsAlreadyMappedErr fallback still guards pinned
 // letters.
-func nodeAdoptExistingMounts(desired []nodeMountDesired, uncFor func(nodeMountDesired) string) {
+func nodeAdoptExistingMounts(desired []nodeMountDesired, uncFor func(ownerIP, share string) string) {
 	live, src, err := nodeListUserMounts()
 	if err != nil {
 		log.Printf("node: folder-mount: could not list existing mounts for adoption: %v", err)
@@ -756,7 +756,7 @@ func nodeAdoptExistingMounts(desired []nodeMountDesired, uncFor func(nodeMountDe
 		if nodeDriveForKey(nodeMountedDrives, key) != "" {
 			continue // already tracked
 		}
-		want := uncFor(m)
+		want := uncFor(m.OwnerIP, m.Share)
 		if want == "" {
 			continue
 		}
