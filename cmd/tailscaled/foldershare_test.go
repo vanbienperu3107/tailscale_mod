@@ -5,11 +5,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -426,5 +428,256 @@ func TestNodeShareSig(t *testing.T) {
 	// A share name that is a prefix of another must not collide (NUL delimiter).
 	if nodeShareSig(map[string]string{"ab": "x", "c": "y"}) == nodeShareSig(map[string]string{"a": "bxc", "": "y"}) {
 		t.Error("delimiter must prevent name/path concatenation collisions")
+	}
+}
+
+func TestFolderShareMountArgv(t *testing.T) {
+	if got := nodeMountArgv("Z:", `\\100.100.100.100@8080\tn\itop\test`); !reflect.DeepEqual(
+		got, []string{"use", "Z:", `\\100.100.100.100@8080\tn\itop\test`, "/PERSISTENT:NO"}) {
+		t.Errorf("nodeMountArgv = %v", got)
+	}
+	if got := nodeUnmountArgv("Z:"); !reflect.DeepEqual(got, []string{"use", "Z:", "/delete", "/y"}) {
+		t.Errorf("nodeUnmountArgv = %v", got)
+	}
+	if got := nodeListMountsArgv(); !reflect.DeepEqual(got, []string{"use"}) {
+		t.Errorf("nodeListMountsArgv = %v", got)
+	}
+}
+
+func TestFolderShareParseNetUseTable(t *testing.T) {
+	// Realistic `net use` output: header, an OK row, a Disconnected row, a
+	// no-status row, and trailer. Only drive-lettered rows with a \\ remote count.
+	out := "New connections will be remembered.\r\n\r\n" +
+		"Status       Local     Remote                    Network\r\n" +
+		"-------------------------------------------------------------------------------\r\n" +
+		`OK           Z:        \\100.100.100.100@8080\tn\itop\test` + "  Web Client Network\r\n" +
+		`Disconnected Y:        \\100.100.100.100@8080\tn\pc\docs` + "     Web Client Network\r\n" +
+		`             X:        \\srv\share` + "                          Microsoft Windows Network\r\n" +
+		"The command completed successfully.\r\n"
+	got := nodeParseNetUseTable(out)
+	want := map[string]string{
+		"Z:": `\\100.100.100.100@8080\tn\itop\test`,
+		"Y:": `\\100.100.100.100@8080\tn\pc\docs`,
+		"X:": `\\srv\share`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("nodeParseNetUseTable = %#v, want %#v", got, want)
+	}
+	if len(nodeParseNetUseTable("There are no entries in the list.\r\n")) != 0 {
+		t.Error("empty listing must parse to no entries")
+	}
+}
+
+func TestFolderShareUNCMatch(t *testing.T) {
+	a := `\\100.100.100.100@8080\tn\itop\test`
+	if !nodeUNCMatch(a, a) {
+		t.Error("identical UNC must match")
+	}
+	// Case-insensitive + trailing-slash tolerant (net use may echo either).
+	if !nodeUNCMatch(strings.ToUpper(a), a+`\`) {
+		t.Error("case/trailing-slash differences must still match")
+	}
+	if nodeUNCMatch(a, `\\100.100.100.100@8080\tn\itop\other`) {
+		t.Error("different share must not match")
+	}
+	if nodeUNCMatch("", "") {
+		t.Error("empty must not match (nothing to adopt)")
+	}
+}
+
+func TestFolderShareIsAlreadyMappedErr(t *testing.T) {
+	yes := []error{
+		errors.New("exit status 2: System error 85 has occurred."),
+		errors.New("net use exited 2: System error 1219 has occurred."),
+		errors.New("The local device name is already in use."),
+	}
+	for _, e := range yes {
+		if !nodeIsAlreadyMappedErr(e) {
+			t.Errorf("want already-mapped for %v", e)
+		}
+	}
+	no := []error{nil, errors.New("System error 67 has occurred."), errors.New("access denied")}
+	for _, e := range no {
+		if nodeIsAlreadyMappedErr(e) {
+			t.Errorf("want NOT already-mapped for %v", e)
+		}
+	}
+}
+
+func TestFolderShareSelectMountTokenSource(t *testing.T) {
+	tests := []struct {
+		name string
+		env  nodeTokenEnv
+		want nodeMountTokenSource
+	}{
+		{"elevated user with linked", nodeTokenEnv{Elevated: true, HaveLinkedToken: true}, nodeMountTokenLinked},
+		{"elevated user no linked (UAC off/RID500)", nodeTokenEnv{Elevated: true}, nodeMountTokenCurrent},
+		{"non-elevated (linked is the elevated one)", nodeTokenEnv{HaveLinkedToken: true, LinkedElevated: true}, nodeMountTokenCurrent},
+		{"system with console user", nodeTokenEnv{IsSystem: true, HaveConsoleUser: true}, nodeMountTokenActiveSession},
+		{"system no console", nodeTokenEnv{IsSystem: true}, nodeMountTokenCurrent},
+	}
+	for _, tt := range tests {
+		if got := nodeSelectMountTokenSource(tt.env); got != tt.want {
+			t.Errorf("%s: nodeSelectMountTokenSource = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestFolderShareMountVisibleToUser(t *testing.T) {
+	tests := []struct {
+		src                            nodeMountTokenSource
+		userIsolated, linkedConnEffect bool
+		want                           bool
+	}{
+		{nodeMountTokenLinked, true, false, true},        // mapped into user session
+		{nodeMountTokenActiveSession, true, false, true}, // mapped into console session
+		{nodeMountTokenCurrent, false, false, true},      // not isolated -> visible
+		{nodeMountTokenCurrent, true, false, false},      // isolated, no linked-conn -> hidden
+		{nodeMountTokenCurrent, true, true, true},        // isolated but linked-conn effective
+	}
+	for _, tt := range tests {
+		if got := nodeMountVisibleToUser(tt.src, tt.userIsolated, tt.linkedConnEffect); got != tt.want {
+			t.Errorf("nodeMountVisibleToUser(%v,%v,%v) = %v, want %v",
+				tt.src, tt.userIsolated, tt.linkedConnEffect, got, tt.want)
+		}
+	}
+}
+
+func TestFolderShareMountStatusFor(t *testing.T) {
+	m := nodeMountDesired{Machine: "itop", Share: "test", Drive: "Z:"}
+
+	// Success visible to user -> clean OK.
+	if st := nodeMountStatusFor(m, "Z:", "", nodeMountTokenLinked, true, false); !st.OK || st.Error != "" || st.Warning != "" {
+		t.Errorf("linked success: %+v, want OK with no error/warning", st)
+	}
+	// Mapped only in elevated session -> NOT OK, but never a blank error.
+	st := nodeMountStatusFor(m, "Z:", "", nodeMountTokenCurrent, true, false)
+	if st.OK || st.Error == "" || st.Warning == "" {
+		t.Errorf("hidden mount: %+v, want OK=false with non-empty error AND warning", st)
+	}
+	// A real mount error dominates.
+	if st := nodeMountStatusFor(m, "", "System error 67", nodeMountTokenCurrent, true, false); st.OK || st.Error != "System error 67" {
+		t.Errorf("mount error: %+v, want OK=false Error=System error 67", st)
+	}
+	// No free letter.
+	if st := nodeMountStatusFor(m, "", "", nodeMountTokenCurrent, false, false); st.OK || st.Error != "not mounted" {
+		t.Errorf("no letter: %+v, want OK=false Error=not mounted", st)
+	}
+}
+
+func TestFolderShareAdoptExistingMounts(t *testing.T) {
+	defer resetMountState()()
+	unc := nodeDriveMountUNC("ts.net", "itop", "test")
+	nodeListUserMounts = func() (map[string]string, nodeMountTokenSource, error) {
+		return map[string]string{"Z:": unc}, nodeMountTokenLinked, nil
+	}
+	desired := []nodeMountDesired{{Machine: "itop", OwnerIP: "100.64.0.19", Share: "test", Drive: "Z:"}}
+	uncFor := func(ownerIP, share string) string { return unc }
+
+	nodeAdoptExistingMounts(desired, uncFor)
+	if nodeMountedDrives["Z:"] != "itop|test" {
+		t.Errorf("expected Z: adopted to itop|test, got %q", nodeMountedDrives["Z:"])
+	}
+	if nodeMountSource["Z:"] != nodeMountTokenLinked {
+		t.Errorf("expected adopted source linked, got %v", nodeMountSource["Z:"])
+	}
+
+	// A UNC mismatch must NOT adopt.
+	resetMaps()
+	uncMismatch := func(ownerIP, share string) string { return nodeDriveMountUNC("ts.net", "itop", "other") }
+	nodeAdoptExistingMounts(desired, uncMismatch)
+	if len(nodeMountedDrives) != 0 {
+		t.Errorf("mismatched UNC must not adopt, got %v", nodeMountedDrives)
+	}
+}
+
+func TestFolderShareReconcile(t *testing.T) {
+	defer resetMountState()()
+	nodeMountsSupported = true
+	nodeResolveDrivePeers = func(string) (map[string]string, string, error) {
+		return map[string]string{"100.64.0.19": "itop"}, "ts.net", nil
+	}
+	nodeMountEnvFn = func() (bool, bool) { return true, false } // elevated+isolated
+	unc := nodeDriveMountUNC("ts.net", "itop", "test")
+	desired := []nodeMountDesired{{Machine: "itop", OwnerIP: "100.64.0.19", Share: "test", Drive: "Z:"}}
+
+	t.Run("adopt existing -> no remount, OK", func(t *testing.T) {
+		resetMaps()
+		nodeListUserMounts = func() (map[string]string, nodeMountTokenSource, error) {
+			return map[string]string{"Z:": unc}, nodeMountTokenLinked, nil
+		}
+		mounted := false
+		nodeMountDrive = func(string, string) (nodeMountTokenSource, error) { mounted = true; return nodeMountTokenLinked, nil }
+		st := nodeReconcileMounts("exe", desired)
+		if mounted {
+			t.Error("must not re-mount an adopted drive")
+		}
+		if len(st) != 1 || !st[0].OK || st[0].Drive != "Z:" {
+			t.Errorf("status = %+v, want one OK Z:", st)
+		}
+	})
+
+	t.Run("fresh mount via linked -> OK", func(t *testing.T) {
+		resetMaps()
+		nodeListUserMounts = func() (map[string]string, nodeMountTokenSource, error) { return map[string]string{}, nodeMountTokenLinked, nil }
+		var gotDrive, gotUNC string
+		nodeMountDrive = func(d, u string) (nodeMountTokenSource, error) { gotDrive, gotUNC = d, u; return nodeMountTokenLinked, nil }
+		st := nodeReconcileMounts("exe", desired)
+		if gotDrive != "Z:" || gotUNC != unc {
+			t.Errorf("mounted %q -> %q, want Z: -> %q", gotDrive, gotUNC, unc)
+		}
+		if len(st) != 1 || !st[0].OK {
+			t.Errorf("status = %+v, want one OK", st)
+		}
+	})
+
+	t.Run("mount via current while isolated -> honest not-OK", func(t *testing.T) {
+		resetMaps()
+		nodeListUserMounts = func() (map[string]string, nodeMountTokenSource, error) { return map[string]string{}, nodeMountTokenCurrent, nil }
+		nodeMountDrive = func(string, string) (nodeMountTokenSource, error) { return nodeMountTokenCurrent, nil }
+		st := nodeReconcileMounts("exe", desired)
+		if len(st) != 1 || st[0].OK || st[0].Error == "" {
+			t.Errorf("status = %+v, want one not-OK with a non-empty error", st)
+		}
+	})
+}
+
+func TestFolderShareMountPoints2Key(t *testing.T) {
+	got := nodeMountPoints2Key(`\\100.100.100.100@8080\tail.example.ts.net\itop\test2`)
+	want := "##100.100.100.100@8080#tail.example.ts.net#itop#test2"
+	if got != want {
+		t.Errorf("nodeMountPoints2Key = %q, want %q", got, want)
+	}
+}
+
+// resetMaps clears the in-memory mount tracking between subtests.
+func resetMaps() {
+	nodeMountedDrives = map[string]string{}
+	nodeMountSource = map[string]nodeMountTokenSource{}
+	nodeDriveLabeled = map[string]string{}
+}
+
+// resetMountState snapshots the injectable mount seams + tracking maps and
+// returns a restorer, so a test can override them without leaking into others.
+func resetMountState() func() {
+	origSupported := nodeMountsSupported
+	origResolve := nodeResolveDrivePeers
+	origList := nodeListUserMounts
+	origMount := nodeMountDrive
+	origUnmount := nodeUnmountDrive
+	origEnv := nodeMountEnvFn
+	origMounted := nodeMountedDrives
+	origSource := nodeMountSource
+	resetMaps()
+	nodeUnmountDrive = func(string, nodeMountTokenSource) error { return nil }
+	return func() {
+		nodeMountsSupported = origSupported
+		nodeResolveDrivePeers = origResolve
+		nodeListUserMounts = origList
+		nodeMountDrive = origMount
+		nodeUnmountDrive = origUnmount
+		nodeMountEnvFn = origEnv
+		nodeMountedDrives = origMounted
+		nodeMountSource = origSource
 	}
 }

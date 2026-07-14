@@ -149,6 +149,16 @@ func nodeDaemonDashboardLoops() {
 	if !ready {
 		log.Printf("node: daemon dashboard: LocalAPI not ready after wait; starting pollers anyway (they self-retry)")
 	}
+	// Backstop for the grantee-side Taildrive auto-mount: ensure
+	// EnableLinkedConnections is set (from the elevated daemon, not only from
+	// `install`) so even the in-process fallback mount can surface in normal
+	// Explorer after a reboot. No-op off Windows / when already set — the primary
+	// path mounts into the user session live and needs no reboot (foldershare_windows.go).
+	nodeEnsureLinkedConnections()
+	if nodeLinkedConnNeedsReboot {
+		log.Printf("node: folder-mount: a one-time reboot is pending for EnableLinkedConnections to take effect on the fallback mount path")
+	}
+
 	log.Printf("node: daemon-side dashboard pollers starting (dashboard=%s)", nodeMetricsURL)
 	go nodeRuntimePollLoop(exe, nodeLANRoutes)
 	go nodeBrowsePollLoop()
