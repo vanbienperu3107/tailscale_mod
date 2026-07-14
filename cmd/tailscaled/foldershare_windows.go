@@ -358,6 +358,21 @@ func nodeEnsureService(name, startType, why string) {
 	log.Printf("node: folder-mount: started %s service (needed for %s)", name, why)
 }
 
+// nodeSetDriveLabel gives the mapped drive a friendly Explorer label (the share
+// name) instead of the long WebDAV UNC, via HKCU\...\MountPoints2\<unc>\
+// _LabelFromReg. HKCU resolves to this (same) user's hive, so the interactive
+// Explorer picks it up. Best-effort. Note: labels for a UNC that is only mapped
+// in the linked/user token still live under the same user's HKCU, so writing
+// from the elevated daemon is correct.
+func nodeSetDriveLabel(unc, label string) {
+	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\` + nodeMountPoints2Key(unc)
+	if err := exec.Command("reg", "add", key, "/v", "_LabelFromReg", "/t", "REG_SZ", "/d", label, "/f").Run(); err != nil {
+		log.Printf("node: folder-mount: could not set drive label %q for %s (%v)", label, unc, err)
+		return
+	}
+	log.Printf("node: folder-mount: labeled %s as %q", unc, label)
+}
+
 // nodeNetExe / nodeSystemDir resolve net.exe / cmd.exe from the real system
 // directory rather than trusting PATH in the target token's environment.
 func nodeNetExe() string {

@@ -397,6 +397,17 @@ var nodeMountedDrives = map[string]string{}
 // nodeMountedDrives; both are cleaned up together on unmount.
 var nodeMountSource = map[string]nodeMountTokenSource{}
 
+// nodeDriveLabeled remembers which UNC each drive letter's Explorer label was
+// last set for, so nodeSetDriveLabel runs once per (drive,unc) rather than every
+// 20s poll.
+var nodeDriveLabeled = map[string]string{}
+
+// nodeMountPoints2Key encodes a UNC into its HKCU Explorer MountPoints2 subkey
+// name (every backslash becomes '#', so the leading \\ becomes ##). Pure.
+func nodeMountPoints2Key(unc string) string {
+	return strings.ReplaceAll(unc, `\`, "#")
+}
+
 // nodeMountsSupported gates the whole grantee-side mount feature to Windows
 // (drive-letter mapping is a Windows concept). A var, not a direct
 // runtime.GOOS check, so nodeReconcileMounts can be exercised on the Linux CI
@@ -739,6 +750,15 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStat
 		src, ok := mountSrc[key]
 		if !ok {
 			src = nodeMountSource[drive] // adopted / already-mounted before this pass
+		}
+		// Give the drive a friendly Explorer label (the share name) instead of
+		// the long WebDAV UNC Windows uses by default. Once per (drive,unc) —
+		// covers freshly-mounted and adopted drives alike.
+		if drive != "" && mountErr[key] == "" {
+			if u := uncFor(m.OwnerIP, m.Share); u != "" && nodeDriveLabeled[drive] != u {
+				nodeSetDriveLabel(u, m.Share)
+				nodeDriveLabeled[drive] = u
+			}
 		}
 		st = append(st, nodeMountStatusFor(m, drive, mountErr[key], src, userIsolated, linkedConnEff))
 	}

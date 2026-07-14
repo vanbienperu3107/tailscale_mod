@@ -24,6 +24,8 @@ func nodeEnsureLinkedConnections() {}
 
 func nodeEnsureWebClient() {}
 
+func nodeSetDriveLabel(unc, label string) {}
+
 func nodeRunNetUseVia(_ nodeMountTokenSource, args []string) (nodeMountTokenSource, string, error) {
 	c := exec.Command("net", args...)
 	out, err := c.CombinedOutput()

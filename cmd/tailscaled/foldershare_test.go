@@ -642,10 +642,19 @@ func TestFolderShareReconcile(t *testing.T) {
 	})
 }
 
+func TestFolderShareMountPoints2Key(t *testing.T) {
+	got := nodeMountPoints2Key(`\\100.100.100.100@8080\tail.example.ts.net\itop\test2`)
+	want := "##100.100.100.100@8080#tail.example.ts.net#itop#test2"
+	if got != want {
+		t.Errorf("nodeMountPoints2Key = %q, want %q", got, want)
+	}
+}
+
 // resetMaps clears the in-memory mount tracking between subtests.
 func resetMaps() {
 	nodeMountedDrives = map[string]string{}
 	nodeMountSource = map[string]nodeMountTokenSource{}
+	nodeDriveLabeled = map[string]string{}
 }
 
 // resetMountState snapshots the injectable mount seams + tracking maps and
