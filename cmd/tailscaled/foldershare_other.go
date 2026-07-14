@@ -22,6 +22,8 @@ func nodeMountEnv() (userIsolated, linkedConnEffective bool) { return false, fal
 
 func nodeEnsureLinkedConnections() {}
 
+func nodeEnsureWebClient() {}
+
 func nodeRunNetUseVia(_ nodeMountTokenSource, args []string) (string, error) {
 	c := exec.Command("net", args...)
 	out, err := c.CombinedOutput()

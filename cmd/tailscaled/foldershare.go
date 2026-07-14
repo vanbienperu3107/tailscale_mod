@@ -636,6 +636,16 @@ func nodeReconcileMounts(exe string, desired []nodeMountDesired) []nodeMountStat
 		return nil
 	}
 
+	// WebDAV drive mounts (\\100.100.100.100@8080\...) require the WebClient
+	// service. It's Manual/Trigger-start and is frequently found STOPPED (never
+	// started this boot) — every `net use` then fails with System error 67 while
+	// a stale in-memory ok=true keeps the dashboard falsely green. Ensure it's
+	// enabled and running before we try to mount. Only when this node actually
+	// has mounts to make (grantee side).
+	if len(desired) > 0 {
+		nodeEnsureWebClient()
+	}
+
 	userIsolated, linkedConnEff := nodeMountEnvFn()
 
 	// Resolve every owner IP to its Taildrive peer short name + tailnet suffix
