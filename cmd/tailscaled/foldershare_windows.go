@@ -97,17 +97,29 @@ func nodeMountEnv() (userIsolated, linkedConnEffective bool) {
 // the combined output. Fail-open: if the user token can't be acquired it logs
 // and degrades to an in-process net use (whose visibility the caller reports
 // honestly).
-func nodeRunNetUseVia(src nodeMountTokenSource, args []string) (string, error) {
+func nodeRunNetUseVia(src nodeMountTokenSource, args []string) (nodeMountTokenSource, string, error) {
 	if src == nodeMountTokenCurrent {
-		return nodeRunNetInProcess(args)
+		out, err := nodeRunNetInProcess(args)
+		return nodeMountTokenCurrent, out, err
 	}
 	tok, closeTok, err := nodeInteractiveUserToken(src)
 	if err != nil {
-		log.Printf("node: folder-mount: %s token unavailable (%v); using in-process net use (may not be visible to user)", nodeTokenSourceName(src), err)
-		return nodeRunNetInProcess(args)
+		log.Printf("node: folder-mount: %s token unavailable (%v); using in-process net use (needs EnableLinkedConnections + reboot to show)", nodeTokenSourceName(src), err)
+		out, e := nodeRunNetInProcess(args)
+		return nodeMountTokenCurrent, out, e
 	}
 	defer closeTok()
-	return nodeRunNetAsUserToken(tok, args)
+	out, err := nodeRunNetAsUserToken(tok, args)
+	if err != nil {
+		// Token acquired but the spawn failed (e.g. CreateProcessWithTokenW
+		// ACCESS_DENIED on a locked-down box). Degrade to an in-process elevated
+		// net use so the drive still maps; honest status then flags it as
+		// needing EnableLinkedConnections + a reboot to become visible.
+		log.Printf("node: folder-mount: %s run failed (%v); using in-process net use (needs EnableLinkedConnections + reboot to show)", nodeTokenSourceName(src), err)
+		out2, e2 := nodeRunNetInProcess(args)
+		return nodeMountTokenCurrent, out2, e2
+	}
+	return src, out, nil
 }
 
 func nodeRunNetInProcess(args []string) (string, error) {
@@ -398,8 +410,14 @@ func nodeShellUserToken() (windows.Token, error) {
 	}
 	defer hTok.Close()
 
+	// CreateProcessWithTokenW requires the token to carry TOKEN_ASSIGN_PRIMARY,
+	// TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_ADJUST_DEFAULT AND TOKEN_ADJUST_SESSIONID.
+	// Duplicating with 0 inherits only the opened handle's rights (missing the two
+	// ADJUST rights) and yields ERROR_ACCESS_DENIED — request the full set.
+	const dupAccess = windows.TOKEN_ASSIGN_PRIMARY | windows.TOKEN_DUPLICATE |
+		windows.TOKEN_QUERY | windows.TOKEN_ADJUST_DEFAULT | windows.TOKEN_ADJUST_SESSIONID
 	var primary windows.Token
-	if err := windows.DuplicateTokenEx(hTok, 0, nil, windows.SecurityImpersonation, windows.TokenPrimary, &primary); err != nil {
+	if err := windows.DuplicateTokenEx(hTok, dupAccess, nil, windows.SecurityImpersonation, windows.TokenPrimary, &primary); err != nil {
 		return 0, fmt.Errorf("DuplicateTokenEx(explorer): %w", err)
 	}
 	return primary, nil

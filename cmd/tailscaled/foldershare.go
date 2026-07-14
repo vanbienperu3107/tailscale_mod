@@ -582,32 +582,31 @@ func nodeMountStatusFor(m nodeMountDesired, drive, mountErr string,
 // Their default bodies delegate to the platform-specific nodeRunNetUseVia /
 // nodeCurrentMountSource / nodeMountEnv (real on Windows, stubs elsewhere).
 
-// nodeMountDrive maps drive->unc and returns the token source actually used
-// (needed later to unmount in the same session and to report honest status).
+// nodeMountDrive maps drive->unc and returns the token source ACTUALLY used
+// (nodeRunNetUseVia may fall back from a user token to in-process) — needed to
+// unmount in the same session and to report honest visibility status.
 var nodeMountDrive = func(drive, unc string) (nodeMountTokenSource, error) {
-	src := nodeCurrentMountSource()
-	_, err := nodeRunNetUseVia(src, nodeMountArgv(drive, unc))
-	return src, err
+	actual, _, err := nodeRunNetUseVia(nodeCurrentMountSource(), nodeMountArgv(drive, unc))
+	return actual, err
 }
 
 // nodeUnmountDrive removes a mapping in the SAME session it was created in
 // (src is the value stored in nodeMountSource at mount time).
 var nodeUnmountDrive = func(drive string, src nodeMountTokenSource) error {
-	_, err := nodeRunNetUseVia(src, nodeUnmountArgv(drive))
+	_, _, err := nodeRunNetUseVia(src, nodeUnmountArgv(drive))
 	return err
 }
 
 // nodeListUserMounts returns the drive-letter -> UNC map currently visible in
-// the session we mount into, plus the source used to read it. Used to ADOPT
-// mappings that survived a daemon restart so we don't re-`net use` a live
+// the session we mount into, plus the source ACTUALLY used to read it. Used to
+// ADOPT mappings that survived a daemon restart so we don't re-`net use` a live
 // pinned letter (System error 85) forever.
 var nodeListUserMounts = func() (map[string]string, nodeMountTokenSource, error) {
-	src := nodeCurrentMountSource()
-	out, err := nodeRunNetUseVia(src, nodeListMountsArgv())
+	actual, out, err := nodeRunNetUseVia(nodeCurrentMountSource(), nodeListMountsArgv())
 	if err != nil {
-		return nil, src, err
+		return nil, actual, err
 	}
-	return nodeParseNetUseTable(out), src, nil
+	return nodeParseNetUseTable(out), actual, nil
 }
 
 // nodeMountEnvFn reports (userIsolated, linkedConnEffective) for honest status:

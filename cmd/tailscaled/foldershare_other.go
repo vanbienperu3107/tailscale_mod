@@ -24,11 +24,11 @@ func nodeEnsureLinkedConnections() {}
 
 func nodeEnsureWebClient() {}
 
-func nodeRunNetUseVia(_ nodeMountTokenSource, args []string) (string, error) {
+func nodeRunNetUseVia(_ nodeMountTokenSource, args []string) (nodeMountTokenSource, string, error) {
 	c := exec.Command("net", args...)
 	out, err := c.CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		return nodeMountTokenCurrent, string(out), fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
-	return string(out), nil
+	return nodeMountTokenCurrent, string(out), nil
 }
