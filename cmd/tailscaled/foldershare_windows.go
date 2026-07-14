@@ -321,19 +321,29 @@ func nodeEnsureLinkedConnections() {
 // daemon can enable + start it. Best-effort: any failure is logged and retried
 // next poll (the mount that follows will surface the real error).
 func nodeEnsureWebClient() {
-	out, _ := exec.Command("sc", "query", "webclient").CombinedOutput()
+	// WebClient (WebDAV redirector): Automatic so it survives the WebDAV
+	// idle-stop that would otherwise drop the mapping every ~minute. Without it
+	// `net use \\host@8080\...` fails with System error 67.
+	nodeEnsureService("webclient", "auto", "WebDAV drive mounts (System error 67 without it)")
+	// Secondary Logon (seclogon): CreateProcessWithTokenW is serviced by it; if
+	// hardening disabled it, launching net.exe in the user session fails.
+	nodeEnsureService("seclogon", "demand", "user-session mount via CreateProcessWithTokenW")
+}
+
+// nodeEnsureService makes a Windows service enabled (startType) and running.
+// Best-effort: logged and retried next poll.
+func nodeEnsureService(name, startType, why string) {
+	out, _ := exec.Command("sc", "query", name).CombinedOutput()
 	if strings.Contains(string(out), "RUNNING") {
 		return
 	}
-	// Set it Automatic (not Disabled) so it survives the WebDAV idle-stop that
-	// would otherwise drop the mapping every ~minute, then start it now. `sc
-	// config start= auto` requires the space after "start=" (separate argv here).
-	_ = exec.Command("sc", "config", "webclient", "start=", "auto").Run()
-	if err := exec.Command("net", "start", "webclient").Run(); err != nil {
-		log.Printf("node: folder-mount: could not start WebClient service (%v); WebDAV drive mounts will fail with System error 67 until it runs", err)
+	// `sc config start= <type>` requires the space after "start=" (separate argv).
+	_ = exec.Command("sc", "config", name, "start=", startType).Run()
+	if err := exec.Command("net", "start", name).Run(); err != nil {
+		log.Printf("node: folder-mount: could not start %s service (%v); %s may fail until it runs", name, err, why)
 		return
 	}
-	log.Printf("node: folder-mount: started WebClient service (required for WebDAV drive mounts)")
+	log.Printf("node: folder-mount: started %s service (needed for %s)", name, why)
 }
 
 // nodeNetExe / nodeSystemDir resolve net.exe / cmd.exe from the real system
