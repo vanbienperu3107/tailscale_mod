@@ -67,16 +67,22 @@ func startHomeDerpReporter(logf logger.Logf, lb *ipnlocal.LocalBackend) {
 }
 
 func runHomeDerpReporter(logf logger.Logf, lb *ipnlocal.LocalBackend, base, secret string) {
-	mac := primaryMAC()
+	// Resolve the MAC lazily: this goroutine starts before the network is
+	// necessarily up, and the dashboard keys every row by MAC (an empty one is
+	// rejected 400). Retry each tick until we have a real one. See reporterutil.go.
+	var mac macResolver
+	var post reportPostState
 	client := &http.Client{Timeout: homeDerpHTTPTimeout}
 	t := time.NewTicker(homeDerpReportInterval)
 	defer t.Stop()
 	for {
-		if rep, ok := collectHomeDerpReport(lb, mac); ok {
+		if m := mac.get(); m == "" {
+			logf("[v1] homederpreport: no primary MAC yet; skipping this tick")
+		} else if rep, ok := collectHomeDerpReport(lb, m); ok {
 			start := time.Now()
-			if err := postHomeDerpReport(client, base, secret, rep); err != nil {
-				logf("[v1] homederpreport: post failed: %v", err)
-			} else {
+			err := postHomeDerpReport(client, base, secret, rep)
+			post.note(logf, "homederpreport", err)
+			if err == nil {
 				rep.ControllerLatencyMs = float64(time.Since(start).Microseconds()) / 1000
 				// Latency is only known AFTER the first POST returns, so send a
 				// quick follow-up with it filled in rather than delay reporting.
@@ -131,6 +137,7 @@ func postHomeDerpReport(client *http.Client, base, secret string, rep homeDerpRe
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	return nil
+	// A 400 here (e.g. empty mac) used to be swallowed silently — the report was
+	// dropped and nothing was ever logged. See reporterutil.go.
+	return checkPostResponse(resp, "home-derp")
 }

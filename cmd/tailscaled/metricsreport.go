@@ -72,7 +72,12 @@ func startMetricsReporter(logf logger.Logf, lb *ipnlocal.LocalBackend) {
 }
 
 func runMetricsReporter(logf logger.Logf, lb *ipnlocal.LocalBackend, base, secret string) {
-	mac := primaryMAC()
+	// Lazily resolved — see reporterutil.go. /api/metrics/report tolerates an
+	// empty MAC (it stores ""), so unlike the other two reporters this one never
+	// failed loudly; it just wrote MAC-less rows forever. Re-resolving fixes that
+	// silently-degraded data too.
+	var mac macResolver
+	var post reportPostState
 	client := &http.Client{Timeout: metricsHTTPTimeout}
 	t := time.NewTicker(metricsReportInterval)
 	defer t.Stop()
@@ -80,10 +85,8 @@ func runMetricsReporter(logf logger.Logf, lb *ipnlocal.LocalBackend, base, secre
 	// time or set on the daemon's own command line) — read once, not per tick.
 	nc := nodeNetcheckReport()
 	for {
-		if rep, ok := collectMetricsReport(lb, mac); ok {
-			if err := postMetricsReport(client, base, secret, rep); err != nil {
-				logf("[v1] metricsreport: post failed: %v", err)
-			}
+		if rep, ok := collectMetricsReport(lb, mac.get()); ok {
+			post.note(logf, "metricsreport", postMetricsReport(client, base, secret, rep))
 			if nc.Mode != "" { // only node builds know their own ports; skip otherwise
 				if nc.Client == "" {
 					nc.Client = rep.Hostname
@@ -153,8 +156,7 @@ func postNetcheckReport(client *http.Client, base, secret string, rep netcheckRe
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	return nil
+	return checkPostResponse(resp, "netcheck")
 }
 
 // collectMetricsReport builds one report by disco-pinging every peer. Returns
@@ -243,8 +245,7 @@ func postMetricsReport(client *http.Client, base, secret string, rep metricsRepo
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	return nil
+	return checkPostResponse(resp, "metrics-report")
 }
 
 // firstV4 returns the first IPv4 address as a string, or "".

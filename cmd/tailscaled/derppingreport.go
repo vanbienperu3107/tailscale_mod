@@ -82,23 +82,31 @@ func startDerpPingReporter(logf logger.Logf, lb *ipnlocal.LocalBackend) {
 }
 
 func runDerpPingReporter(logf logger.Logf, lb *ipnlocal.LocalBackend, base, secret string) {
-	mac := primaryMAC()
+	// Lazily resolved: at goroutine start (NewLocalBackend) the NIC may not be up
+	// yet, and the dashboard rejects an empty client MAC with 400. See
+	// reporterutil.go.
+	var mac macResolver
+	var post reportPostState
 	netMon := netmon.NewStatic()
 	client := &http.Client{Timeout: derpPingHTTPTimeout}
 	t := time.NewTicker(derpPingReportInterval)
 	defer t.Stop()
 	for {
+		m := mac.get()
+		if m == "" {
+			logf("[v1] derppingreport: no primary MAC yet; skipping this tick")
+			<-t.C
+			continue
+		}
 		var nodeDM *tailcfg.DERPMap
 		if nm := lb.NetMap(); nm != nil {
 			nodeDM = nm.DERPMap
 		}
 		dm := mergedPingDERPMap(logf, client, base, secret, nodeDM)
 		if dm != nil && len(dm.Regions) > 0 {
-			rep := derpPingReport{Client: mac}
+			rep := derpPingReport{Client: m}
 			rep.Samples = pingAllRegions(logf, netMon, dm)
-			if err := postDerpPingReport(client, base, secret, rep); err != nil {
-				logf("[v1] derppingreport: post failed: %v", err)
-			}
+			post.note(logf, "derppingreport", postDerpPingReport(client, base, secret, rep))
 		}
 		<-t.C
 	}
@@ -232,6 +240,6 @@ func postDerpPingReport(client *http.Client, base, secret string, rep derpPingRe
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	return nil
+	// Non-2xx (e.g. 400 on an empty client MAC) used to be silently ignored.
+	return checkPostResponse(resp, "derp-ping")
 }
