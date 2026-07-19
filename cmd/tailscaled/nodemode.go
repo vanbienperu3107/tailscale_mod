@@ -107,9 +107,42 @@ func init() {
 	// the launcher no longer starts them, and short-lived CLI subprocesses
 	// (`<exe> status`, `<exe> drive share`, spawned BY these loops) skip it, so
 	// there's no duplication or recursion.
+	// The daemon never runs nodeLoadConfig: maybeRunNode hands daemon
+	// invocations straight back to tailscaled (see the '-' check there), which
+	// returns BEFORE runNodeLauncher reads node.conf. So the daemon's own
+	// nodeMetricsURL is whatever was baked into the binary — it cannot see an
+	// operator's node.conf override at all.
+	//
+	// That split silently broke half the dashboard integration: only the three
+	// reporters spawned with TS_METRICS_REPORT in their env followed an
+	// override, while the runtime poll, folder browse and device-register loops
+	// below kept talking to the baked URL. "metrics_url=" (blank, meaning
+	// disable) likewise only silenced the reporters.
+	//
+	// Adopt the launcher's value here so every daemon-side consumer agrees on
+	// one URL. LookupEnv, not Getenv: the launcher always sets the variable
+	// (possibly blank), so presence means "launcher told us", while absence
+	// means a hand-started daemon that must keep the baked default rather than
+	// silently disabling itself.
+	if nodeIsDaemonProc() {
+		v, ok := os.LookupEnv("TS_METRICS_REPORT")
+		nodeMetricsURL = nodeDaemonMetricsURL(v, ok, nodeMetricsURL)
+	}
+
 	if nodeMode != "" && nodeMetricsURL != "" && nodeIsDaemonProc() {
 		go nodeDaemonDashboardLoops()
 	}
+}
+
+// nodeDaemonMetricsURL picks the dashboard base URL a daemon process should
+// use: the launcher-supplied env value when the launcher set one (blank
+// included, which disables the dashboard integration), otherwise the baked-in
+// default for daemons started outside a launcher.
+func nodeDaemonMetricsURL(envVal string, envSet bool, baked string) string {
+	if envSet {
+		return envVal
+	}
+	return baked
 }
 
 // nodeIsDaemonProc reports whether THIS process is the tailscaled daemon
