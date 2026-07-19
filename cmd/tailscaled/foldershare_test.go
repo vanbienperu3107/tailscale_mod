@@ -681,3 +681,111 @@ func resetMountState() func() {
 		nodeMountSource = origSource
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Chuỗi phiên để mount (bug: ổ chỉ Administrator thấy, votam-pc 2026-07-19).
+// ---------------------------------------------------------------------------
+
+func TestNodeMountTokenChain(t *testing.T) {
+	cur, linked, active := nodeMountTokenCurrent, nodeMountTokenLinked, nodeMountTokenActiveSession
+
+	tests := []struct {
+		name string
+		env  nodeTokenEnv
+		want []nodeMountTokenSource
+	}{
+		{
+			// Đây là ca hỏng thật: elevated, có linked token, có người dùng đăng
+			// nhập. Trước đây chỉ thử Linked rồi rơi thẳng xuống in-process ⇒
+			// mount vào phiên admin. Nay phải còn ActiveSession ở giữa.
+			name: "elevated user co linked token",
+			env:  nodeTokenEnv{Elevated: true, HaveLinkedToken: true, HaveConsoleUser: true},
+			want: []nodeMountTokenSource{linked, active, cur},
+		},
+		{
+			name: "SYSTEM service",
+			env:  nodeTokenEnv{IsSystem: true, HaveConsoleUser: true},
+			want: []nodeMountTokenSource{active, cur},
+		},
+		{
+			// Không có window station tương tác (Task Scheduler / service):
+			// Linked chắc chắn hỏng, ActiveSession là tuyến cứu duy nhất.
+			name: "elevated nhung khong co shell",
+			env:  nodeTokenEnv{Elevated: true, HaveLinkedToken: true, HaveConsoleUser: false},
+			want: []nodeMountTokenSource{linked, cur},
+		},
+		{
+			// Không bị chia token ⇒ in-process vốn đã hiện với người dùng.
+			name: "khong elevated",
+			env:  nodeTokenEnv{HaveConsoleUser: true},
+			want: []nodeMountTokenSource{active, cur},
+		},
+		{
+			name: "khong co gi",
+			env:  nodeTokenEnv{},
+			want: []nodeMountTokenSource{cur},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nodeMountTokenChain(tt.env)
+			if len(got) != len(tt.want) {
+				t.Fatalf("chain = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("chain = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestNodeMountTokenChainAlwaysEndsAtCurrentAndHasNoDupes(t *testing.T) {
+	for _, e := range []nodeTokenEnv{
+		{}, {Elevated: true}, {IsSystem: true, HaveConsoleUser: true},
+		{Elevated: true, HaveLinkedToken: true, HaveConsoleUser: true},
+		{IsSystem: true, HaveConsoleUser: true, Elevated: true, HaveLinkedToken: true},
+		{Elevated: true, HaveLinkedToken: true, LinkedElevated: true, HaveConsoleUser: true},
+	} {
+		got := nodeMountTokenChain(e)
+		if len(got) == 0 || got[len(got)-1] != nodeMountTokenCurrent {
+			t.Errorf("env %+v: chain %v phai ket thuc bang current", e, got)
+		}
+		seen := map[nodeMountTokenSource]bool{}
+		for _, s := range got {
+			if seen[s] {
+				t.Errorf("env %+v: chain %v co phien lap lai", e, got)
+			}
+			seen[s] = true
+		}
+	}
+}
+
+// nodeAdoptOrder phải tất định: thứ tự duyệt map trong Go là ngẫu nhiên, nên
+// trước đây cùng một trạng thái có thể nhận M: lượt này, Z: lượt sau.
+func TestNodeAdoptOrderPrefersPinnedLetter(t *testing.T) {
+	live := map[string]string{"M:": `\a\s`, "Z:": `\a\s`, "K:": `\b\t`}
+
+	got := nodeAdoptOrder(live, "Z:")
+	if len(got) != 3 || got[0] != "Z:" {
+		t.Fatalf("adopt order = %v, muon Z: dung dau", got)
+	}
+	if got[1] != "K:" || got[2] != "M:" {
+		t.Fatalf("adopt order = %v, phan con lai phai sap xep", got)
+	}
+
+	// Không ghim, hoặc ghim một ký tự chưa map: chỉ cần tất định.
+	for _, prefer := range []string{"", "Q:"} {
+		a := nodeAdoptOrder(live, prefer)
+		b := nodeAdoptOrder(live, prefer)
+		if len(a) != 3 {
+			t.Fatalf("prefer=%q: adopt order = %v, muon 3 phan tu", prefer, a)
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				t.Fatalf("prefer=%q: adopt order khong tat dinh: %v vs %v", prefer, a, b)
+			}
+		}
+	}
+}
