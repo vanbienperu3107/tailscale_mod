@@ -36,6 +36,64 @@ func TestNodeIsDaemonProc(t *testing.T) {
 	}
 }
 
+// TestNodeDaemonMetricsURL covers how the daemon picks its dashboard base URL.
+// The daemon cannot read node.conf (maybeRunNode returns before
+// runNodeLauncher does), so the launcher's TS_METRICS_REPORT is its only route
+// to an operator override — without this, the runtime poll, folder browse and
+// device-register loops keep using the baked URL while the reporters follow the
+// override, and the two disagree.
+func TestNodeDaemonMetricsURL(t *testing.T) {
+	const baked = "https://baked.example/app"
+	tests := []struct {
+		name   string
+		envVal string
+		envSet bool
+		want   string
+	}{
+		{
+			name:   "launcher supplied an override: follow it, not the baked default",
+			envVal: "https://dashboard.example/app",
+			envSet: true,
+			want:   "https://dashboard.example/app",
+		},
+		{
+			// "metrics_url=" in node.conf means "turn the dashboard off". The
+			// launcher passes that through as a set-but-blank env var, so blank
+			// must NOT fall back to the baked URL — doing so would re-enable
+			// reporting on a machine that deliberately disabled it.
+			name:   "launcher supplied blank: disabled, do not resurrect baked URL",
+			envVal: "",
+			envSet: true,
+			want:   "",
+		},
+		{
+			// A daemon started by hand (or by an older launcher) has no such
+			// env var. Treating that as "blank" would silently kill every
+			// dashboard loop, so absence must keep the baked default.
+			name:   "no env var at all: hand-started daemon keeps baked default",
+			envVal: "",
+			envSet: false,
+			want:   baked,
+		},
+		{
+			name:   "no env var and nothing baked in: stays empty",
+			envVal: "",
+			envSet: false,
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		bakedIn := baked
+		if tt.want == "" && !tt.envSet {
+			bakedIn = ""
+		}
+		if got := nodeDaemonMetricsURL(tt.envVal, tt.envSet, bakedIn); got != tt.want {
+			t.Errorf("%s: nodeDaemonMetricsURL(%q, %v, %q) = %q, want %q",
+				tt.name, tt.envVal, tt.envSet, bakedIn, got, tt.want)
+		}
+	}
+}
+
 // TestNodeShouldReapply validates the decision logic behind the runtime poll
 // loop: reapply on an actual advertise_routes change, OR on a distinct
 // reload_at (the CMS "Reload" button), but not on an unchanged poll result.
