@@ -39,7 +39,11 @@ jobs:
         run: |
           set -eu
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
-          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed|NodeXML|NodeEnroll|NodeProbe'
+          # LƯU Ý: bộ lọc -run này là danh sách CHO PHÉP — test nào không khớp
+          # tên ở đây sẽ KHÔNG chạy, và CI vẫn xanh. Thêm test mới vào
+          # cmd/tailscaled thì phải thêm tên vào đây, nếu không nó không bao giờ
+          # được chạy (đã suýt lọt bản fix mount 2026-07-19 vì lý do này).
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed|NodeXML|NodeEnroll|NodeProbe|NodeMount|NodeAdopt'
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
           # Deterministic machine key (seed → stable identity, no IP drift).
           go test -v -run 'MachineFromSeed|MachineKey' ./types/key/

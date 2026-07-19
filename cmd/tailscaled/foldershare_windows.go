@@ -28,6 +28,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -68,19 +69,31 @@ func nodeCurrentTokenEnv() nodeTokenEnv {
 	return e
 }
 
-// nodeCurrentMountSource decides which context to run `net use` in this pass.
-// TS_MOUNT_TOKEN_SOURCE (current|linked|active) forces one, for verifying the
-// degrade path on a real box.
-func nodeCurrentMountSource() nodeMountTokenSource {
+// nodeForcedMountSource returns the source pinned by TS_MOUNT_TOKEN_SOURCE
+// (current|linked|active), or nil. Used to verify one specific path on a real
+// box without the chain masking which one actually worked.
+func nodeForcedMountSource() *nodeMountTokenSource {
+	var s nodeMountTokenSource
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("TS_MOUNT_TOKEN_SOURCE"))) {
 	case "current":
-		return nodeMountTokenCurrent
+		s = nodeMountTokenCurrent
 	case "linked":
-		return nodeMountTokenLinked
+		s = nodeMountTokenLinked
 	case "active", "activesession":
-		return nodeMountTokenActiveSession
+		s = nodeMountTokenActiveSession
+	default:
+		return nil
 	}
-	return nodeSelectMountTokenSource(nodeCurrentTokenEnv())
+	return &s
+}
+
+// nodeCurrentMountSource is the PREFERRED source (head of the chain). Kept for
+// the seam signatures; nodeRunNetUseVia walks the whole chain.
+func nodeCurrentMountSource() nodeMountTokenSource {
+	if f := nodeForcedMountSource(); f != nil {
+		return *f
+	}
+	return nodeMountTokenChain(nodeCurrentTokenEnv())[0]
 }
 
 // nodeMountEnv reports (userIsolated, linkedConnEffective). We deliberately do
@@ -93,33 +106,98 @@ func nodeMountEnv() (userIsolated, linkedConnEffective bool) {
 	return e.Elevated && e.HaveLinkedToken && !e.LinkedElevated, false
 }
 
-// nodeRunNetUseVia runs `net <args...>` in the security context src and returns
-// the combined output. Fail-open: if the user token can't be acquired it logs
-// and degrades to an in-process net use (whose visibility the caller reports
-// honestly).
-func nodeRunNetUseVia(src nodeMountTokenSource, args []string) (nodeMountTokenSource, string, error) {
-	if src == nodeMountTokenCurrent {
-		out, err := nodeRunNetInProcess(args)
-		return nodeMountTokenCurrent, out, err
+// nodeSpawnError marks "could not START net.exe in this session" as opposed to
+// "net.exe ran here and reported a failure". The difference decides whether it
+// is safe to try the NEXT session in the chain.
+type nodeSpawnError struct{ err error }
+
+func (e nodeSpawnError) Error() string { return e.err.Error() }
+func (e nodeSpawnError) Unwrap() error { return e.err }
+
+// nodeMountLastGood remembers the token source that last actually worked.
+//
+// ★ Mọi lệnh trong MỘT lượt (liệt kê / mount / unmount) phải chạy trong CÙNG
+// một phiên. Trước đây mỗi lệnh tự chọn phiên độc lập và tự degrade riêng, nên
+// có thể liệt kê ở phiên user nhưng mount ở phiên elevated. Hậu quả đúng như
+// quan sát được trên votam-pc: ổ mount ở phiên admin nên bản liệt kê (phiên
+// user) không thấy → adoption trượt → mỗi lượt lại cấp MỘT KÝ TỰ MỚI cho cùng
+// một share (Z: và M: cùng trỏ \\…\itop-thanhhn5\test), và người dùng thường
+// không thấy ổ nào cả.
+var (
+	nodeMountLastGoodMu sync.Mutex
+	nodeMountLastGood   *nodeMountTokenSource
+)
+
+func nodeRememberGoodSource(src nodeMountTokenSource) {
+	nodeMountLastGoodMu.Lock()
+	defer nodeMountLastGoodMu.Unlock()
+	nodeMountLastGood = &src
+}
+
+// nodeMountSourceChainNow is the ordered list of sessions to try this call. If a
+// source already worked, it goes FIRST so every later command in the same pass
+// lands in the same namespace.
+func nodeMountSourceChainNow() []nodeMountTokenSource {
+	chain := nodeMountTokenChain(nodeCurrentTokenEnv())
+	if forced := nodeForcedMountSource(); forced != nil {
+		return []nodeMountTokenSource{*forced} // TS_MOUNT_TOKEN_SOURCE: no fallback, for testing a path on a real box
 	}
-	tok, closeTok, err := nodeInteractiveUserToken(src)
-	if err != nil {
-		log.Printf("node: folder-mount: %s token unavailable (%v); using in-process net use (needs EnableLinkedConnections + reboot to show)", nodeTokenSourceName(src), err)
-		out, e := nodeRunNetInProcess(args)
-		return nodeMountTokenCurrent, out, e
+	nodeMountLastGoodMu.Lock()
+	good := nodeMountLastGood
+	nodeMountLastGoodMu.Unlock()
+	if good == nil {
+		return chain
 	}
-	defer closeTok()
-	out, err := nodeRunNetAsUserToken(tok, args)
-	if err != nil {
-		// Token acquired but the spawn failed (e.g. CreateProcessWithTokenW
-		// ACCESS_DENIED on a locked-down box). Degrade to an in-process elevated
-		// net use so the drive still maps; honest status then flags it as
-		// needing EnableLinkedConnections + a reboot to become visible.
-		log.Printf("node: folder-mount: %s run failed (%v); using in-process net use (needs EnableLinkedConnections + reboot to show)", nodeTokenSourceName(src), err)
-		out2, e2 := nodeRunNetInProcess(args)
-		return nodeMountTokenCurrent, out2, e2
+	out := []nodeMountTokenSource{*good}
+	for _, s := range chain {
+		if s != *good {
+			out = append(out, s)
+		}
 	}
-	return src, out, nil
+	return out
+}
+
+// nodeRunNetUseVia runs `net <args...>` in the user's session, walking the
+// candidate chain until one SPAWNS. The src argument is advisory (kept for the
+// existing seam signature); the chain decides.
+//
+// ★ Chỉ chuyển sang phiên kế tiếp khi KHÔNG KHỞI ĐỘNG ĐƯỢC net.exe ở phiên này.
+// Nếu net.exe đã chạy và báo lỗi (vd System error 85 — ký tự ổ đã dùng) thì đó
+// là CÂU TRẢ LỜI THẬT của phiên đó, phải trả về nguyên trạng. Thử lại ở phiên
+// khác lúc này chính là cách ổ đĩa chui sang phiên admin.
+func nodeRunNetUseVia(_ nodeMountTokenSource, args []string) (nodeMountTokenSource, string, error) {
+	chain := nodeMountSourceChainNow()
+	for i, src := range chain {
+		if src == nodeMountTokenCurrent {
+			out, err := nodeRunNetInProcess(args)
+			if err == nil {
+				nodeRememberGoodSource(src)
+			}
+			return src, out, err
+		}
+		tok, closeTok, err := nodeInteractiveUserToken(src)
+		if err != nil {
+			log.Printf("node: folder-mount: %s token unavailable (%v); thu phien ke tiep", nodeTokenSourceName(src), err)
+			continue
+		}
+		out, err := nodeRunNetAsUserToken(tok, args)
+		closeTok()
+		var spawn nodeSpawnError
+		if err != nil && errors.As(err, &spawn) {
+			log.Printf("node: folder-mount: %s khong khoi dong duoc net.exe (%v); thu phien ke tiep", nodeTokenSourceName(src), err)
+			continue
+		}
+		// net.exe chạy được ở phiên này — kết quả của nó là kết quả cuối cùng.
+		nodeRememberGoodSource(src)
+		if err != nil && i == len(chain)-1 {
+			log.Printf("node: folder-mount: %s: %v", nodeTokenSourceName(src), err)
+		}
+		return src, out, err
+	}
+	// Không phiên nào khởi động được net.exe. KHÔNG âm thầm mount ở phiên
+	// elevated: làm vậy chỉ tạo ra ổ mà người dùng thường không thấy, lại chiếm
+	// mất ký tự ổ. Báo lỗi thật để dashboard hiển thị đúng.
+	return nodeMountTokenCurrent, "", fmt.Errorf("khong chay duoc net.exe trong phien nguoi dung (da thu %d phien); o dia se khong hien voi user thuong nen khong mount o phien admin", len(chain))
 }
 
 func nodeRunNetInProcess(args []string) (string, error) {
@@ -193,7 +271,7 @@ func nodeRunListViaCmd(tok windows.Token) (string, error) {
 	cmdExe := filepath.Join(nodeSystemDir(), "cmd.exe")
 	cmdLine := fmt.Sprintf(`%s /c net use > "%s" 2>&1`, syscall.EscapeArg(cmdExe), tmpPath)
 	if _, err := nodeCreateProcessWithToken(tok, cmdExe, cmdLine, nil); err != nil {
-		return "", err
+		return "", nodeSpawnError{err} // không khởi động được ⇒ được phép thử phiên khác
 	}
 	out, _ := os.ReadFile(tmpPath)
 	return string(out), nil
@@ -205,6 +283,12 @@ func nodeRunListViaCmd(tok windows.Token) (string, error) {
 // handle still mounts/unmounts correctly (just without the "System error NN"
 // text — adoption already guards the already-mapped case).
 func nodeRunNetDirect(tok windows.Token, args []string) (string, error) {
+	return nodeRunExeDirect(tok, nodeNetExe(), args)
+}
+
+// nodeRunExeDirect runs exe with args under tok (no shell), capturing output
+// best-effort. Shared by the `net use` mounts and by the HKCU label write.
+func nodeRunExeDirect(tok windows.Token, exe string, args []string) (string, error) {
 	tmp, err := os.CreateTemp("", "tsmount-*.out")
 	if err != nil {
 		return "", err
@@ -227,15 +311,14 @@ func nodeRunNetDirect(tok windows.Token, args []string) (string, error) {
 	}
 	defer windows.CloseHandle(fh)
 
-	netExe := nodeNetExe()
-	cmdLine := nodeComposeCmdLine(append([]string{netExe}, args...))
-	code, err := nodeCreateProcessWithToken(tok, netExe, cmdLine, &fh)
+	cmdLine := nodeComposeCmdLine(append([]string{exe}, args...))
+	code, err := nodeCreateProcessWithToken(tok, exe, cmdLine, &fh)
 	if err != nil {
-		return "", err
+		return "", nodeSpawnError{err} // không khởi động được ⇒ được phép thử phiên khác
 	}
 	out, _ := os.ReadFile(tmpPath)
 	if code != 0 {
-		return string(out), fmt.Errorf("net %s exited %d: %s", strings.Join(args, " "), code, strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s %s exited %d: %s", filepath.Base(exe), strings.Join(args, " "), code, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
 }
@@ -364,13 +447,44 @@ func nodeEnsureService(name, startType, why string) {
 // Explorer picks it up. Best-effort. Note: labels for a UNC that is only mapped
 // in the linked/user token still live under the same user's HKCU, so writing
 // from the elevated daemon is correct.
+// ★ PHẢI chạy reg.exe DƯỚI TOKEN NGƯỜI DÙNG, không phải trong tiến trình daemon.
+// HKCU trỏ vào hive của tiến trình ĐANG CHẠY: daemon chạy như SYSTEM thì HKCU là
+// hive của SYSTEM, còn daemon chạy elevated thì vẫn có thể là hive khác với phiên
+// tương tác. Ghi nhầm hive ⇒ Explorer của người dùng không bao giờ đọc được nhãn
+// ⇒ ổ hiện nguyên UNC WebDAV dài thay vì tên thư mục đã nhập. Đây là lý do nhãn
+// không ăn, không phải do đặt sai giá trị.
 func nodeSetDriveLabel(unc, label string) {
 	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\` + nodeMountPoints2Key(unc)
-	if err := exec.Command("reg", "add", key, "/v", "_LabelFromReg", "/t", "REG_SZ", "/d", label, "/f").Run(); err != nil {
+	args := []string{"add", key, "/v", "_LabelFromReg", "/t", "REG_SZ", "/d", label, "/f"}
+	if err := nodeRunUnderUserSession(filepath.Join(nodeSystemDir(), "reg.exe"), args); err != nil {
 		log.Printf("node: folder-mount: could not set drive label %q for %s (%v)", label, unc, err)
 		return
 	}
 	log.Printf("node: folder-mount: labeled %s as %q", unc, label)
+}
+
+// nodeRunUnderUserSession runs exe in the interactive user's session, walking
+// the same chain as the mounts so the registry write lands in the SAME user's
+// hive that the drive was mapped for.
+func nodeRunUnderUserSession(exe string, args []string) error {
+	chain := nodeMountSourceChainNow()
+	for _, src := range chain {
+		if src == nodeMountTokenCurrent {
+			return exec.Command(exe, args...).Run()
+		}
+		tok, closeTok, err := nodeInteractiveUserToken(src)
+		if err != nil {
+			continue
+		}
+		_, err = nodeRunExeDirect(tok, exe, args)
+		closeTok()
+		var spawn nodeSpawnError
+		if err != nil && errors.As(err, &spawn) {
+			continue // không khởi động được ở phiên này, thử phiên kế
+		}
+		return err
+	}
+	return fmt.Errorf("khong chay duoc %s trong phien nguoi dung", filepath.Base(exe))
 }
 
 // nodeNetExe / nodeSystemDir resolve net.exe / cmd.exe from the real system

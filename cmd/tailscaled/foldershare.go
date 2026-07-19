@@ -465,6 +465,47 @@ func nodeSelectMountTokenSource(e nodeTokenEnv) nodeMountTokenSource {
 	}
 }
 
+// nodeMountTokenChain is the ORDERED list of sessions to try, most-preferred
+// first. Pure.
+//
+// Vì sao cần cả chuỗi thay vì chọn đúng một nguồn: nodeSelectMountTokenSource
+// chọn một nguồn rồi hỏng là rơi thẳng xuống in-process (phiên elevated) — ổ
+// mount ra chỉ Administrator thấy, đúng triệu chứng trên votam-pc. Mỗi tuyến
+// tới phiên người dùng hỏng theo một kiểu riêng, nên phải thử hết:
+//
+//   - Linked (mượn token explorer.exe): hỏng khi tiến trình không truy cập được
+//     window station tương tác — GetShellWindow trả 0 (chạy như service, hoặc
+//     Task Scheduler "run whether user is logged on or not").
+//   - ActiveSession (WTSQueryUserToken): cần SeTcbPrivilege, tức phải là SYSTEM.
+//     Chính là tuyến cứu cho trường hợp Linked hỏng ở trên.
+//
+// nodeMountTokenCurrent luôn đứng CUỐI và chỉ là chỗ đặt chân cho máy không hề
+// bị chia token (không elevated, hoặc UAC tắt) — ở đó in-process vốn đã hiện
+// với người dùng. Máy có chia token mà tới được đây thì nodeRunNetUseVia báo
+// lỗi thay vì mount lén vào phiên admin.
+func nodeMountTokenChain(e nodeTokenEnv) []nodeMountTokenSource {
+	var chain []nodeMountTokenSource
+	add := func(s nodeMountTokenSource) {
+		for _, x := range chain {
+			if x == s {
+				return
+			}
+		}
+		chain = append(chain, s)
+	}
+	if e.IsSystem && e.HaveConsoleUser {
+		add(nodeMountTokenActiveSession)
+	}
+	if e.Elevated && e.HaveLinkedToken && !e.LinkedElevated {
+		add(nodeMountTokenLinked)
+	}
+	if e.HaveConsoleUser {
+		add(nodeMountTokenActiveSession)
+	}
+	add(nodeMountTokenCurrent)
+	return chain
+}
+
 // nodeMountVisibleToUser reports whether a mount made via src will actually
 // show up in the interactive user's Explorer. userIsolated means this process
 // is elevated AND has a non-elevated linked sibling — i.e. a real UAC split
@@ -789,18 +830,39 @@ func nodeAdoptExistingMounts(desired []nodeMountDesired, uncFor func(ownerIP, sh
 		if want == "" {
 			continue
 		}
-		for drive, unc := range live {
+		// Ưu tiên nhận đúng ký tự ổ mà admin đã ghim; chỉ khi không có mới nhận
+		// ký tự khác. Trước đây duyệt map trực tiếp — thứ tự map trong Go là
+		// NGẪU NHIÊN, nên cùng một trạng thái có thể nhận M: ở lượt này và Z: ở
+		// lượt sau, làm kế hoạch mount/unmount nhảy qua lại giữa các lượt.
+		for _, drive := range nodeAdoptOrder(live, nodeNormalizeDriveLetter(m.Drive)) {
 			if _, taken := nodeMountedDrives[drive]; taken {
 				continue
 			}
-			if nodeUNCMatch(unc, want) {
+			if nodeUNCMatch(live[drive], want) {
 				nodeMountedDrives[drive] = key
 				nodeMountSource[drive] = src
-				log.Printf("node: folder-mount: adopted existing mount %s -> %s", drive, unc)
+				log.Printf("node: folder-mount: adopted existing mount %s -> %s", drive, live[drive])
 				break
 			}
 		}
 	}
+}
+
+// nodeAdoptOrder lists the drive letters of live in a DETERMINISTIC order:
+// prefer first (the letter the admin pinned) if present, then the rest sorted.
+// Pure.
+func nodeAdoptOrder(live map[string]string, prefer string) []string {
+	rest := make([]string, 0, len(live))
+	for d := range live {
+		if d != prefer {
+			rest = append(rest, d)
+		}
+	}
+	sort.Strings(rest)
+	if _, ok := live[prefer]; ok && prefer != "" {
+		return append([]string{prefer}, rest...)
+	}
+	return rest
 }
 
 // driveMountPlan is one drive-letter assignment nodePlanMounts decided on.
