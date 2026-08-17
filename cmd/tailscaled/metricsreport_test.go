@@ -230,3 +230,53 @@ func TestMacIPv4IsReal(t *testing.T) {
 		t.Error("macIPv4IsReal(nil)=true, want false")
 	}
 }
+
+// TestMacNameIsVirtualDockerBridge khoa lai bat bien "bridge cua Docker khong
+// bao gio duoc coi la NIC that".
+//
+// Do tren vpn4: network do compose tao ra co bridge `br-50740534beeb` mang MAC
+// 12:94:10:b2:ce:37, thap hon MAC cua eth1 (52:54:8f:9b:06:68) theo thu tu chuoi
+// -> pickPrimaryMAC chon bridge lam danh tinh cua node. MAC do sinh lai moi lan
+// Docker dung lai bridge (reboot host la du), keo theo mat IP ghim theo MAC — va
+// chi lo ra o lan DANG KY KE TIEP, rat lau sau cai reboot da gay ra no.
+//
+// Marker "docker" mot minh KHONG du: no chi bat docker0, con moi network
+// user-defined deu ten dang br-<12 hex>.
+func TestMacNameIsVirtualDockerBridge(t *testing.T) {
+	virtual := []string{
+		"br-50740534beeb", // bridge cua compose network tren vpn4 (ca that)
+		"br-7210364aa359",
+		"BR-ABCDEF012345", // hoa/thuong khong duoc anh huong
+		"docker0",
+		"veth1fb83b9",
+		"tailscale0",
+	}
+	for _, name := range virtual {
+		if !macNameIsVirtual(name) {
+			t.Errorf("macNameIsVirtual(%q) = false, muon true (giao dien ao khong duoc chon lam MAC chinh)", name)
+		}
+	}
+
+	// Khong duoc bat qua tay: NIC that phai van du tu cach.
+	real := []string{"eth0", "eth1", "ens192", "enp3s0", "wlan0", "Ethernet"}
+	for _, name := range real {
+		if macNameIsVirtual(name) {
+			t.Errorf("macNameIsVirtual(%q) = true, muon false (day la NIC vat ly)", name)
+		}
+	}
+}
+
+// TestPickPrimaryMACBoQuaBridgeDocker mo phong dung tinh huong vpn4: bridge co
+// MAC "nho hon" NIC that. Sau khi loai bridge o tang macNameIsVirtual, ung vien
+// con lai chi la NIC that -> chon dung eth1.
+func TestPickPrimaryMACBoQuaBridgeDocker(t *testing.T) {
+	// Caller da loc bang macNameIsVirtual truoc khi dua vao pickPrimaryMAC, nen
+	// o day chi con NIC that.
+	got := pickPrimaryMAC([]macCandidate{
+		{mac: "52:54:8f:9b:06:68", hasRealIP: true}, // eth1 (public)
+		{mac: "52:54:91:ba:2d:b3", hasRealIP: true}, // eth0 (LAN)
+	})
+	if got != "52:54:8f:9b:06:68" {
+		t.Fatalf("pickPrimaryMAC = %q, muon 52:54:8f:9b:06:68 (MAC nho nhat trong cac NIC that)", got)
+	}
+}

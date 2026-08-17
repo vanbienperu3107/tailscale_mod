@@ -266,10 +266,19 @@ func firstV4(ips []netip.Addr) string {
 // — which reassigns the node a brand-new identity on every variant switch and
 // silently breaks per-MAC features (folder-share owner binding, browse
 // requests, runtime config) that were set up under the old MAC.
+// "br-" is the prefix Docker gives the bridge of every user-defined network
+// (br-<12 hex>). "docker" alone only catches the default docker0, so on any
+// host running compose stacks the bridges stayed eligible — and they win the
+// selection whenever their random MAC sorts below the physical NIC's. Measured
+// on vpn4: br-50740534beeb had 12:94:10:b2:ce:37, beating eth1's 52:54:8f:9b:06:68,
+// so the node reported a bridge MAC as its identity. That MAC is regenerated
+// every time Docker recreates the bridge (a host reboot does it), which silently
+// breaks every per-MAC feature — including the static-IP pin, whose loss only
+// surfaces at the *next* registration, long after the reboot that caused it.
 var macVirtualMarkers = []string{
 	"tailscale", "wintun", "wg", "tun", "tap",
 	"openvpn", "wireguard",
-	"vethernet", "veth", "docker", "vmware", "virtualbox", "vbox",
+	"vethernet", "veth", "docker", "br-", "vmware", "virtualbox", "vbox",
 	"hyper-v", "bluetooth", "loopback", "isatap", "teredo",
 }
 
