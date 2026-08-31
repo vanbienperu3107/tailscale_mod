@@ -5,12 +5,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"os/exec"
 	"strings"
@@ -107,6 +109,15 @@ func nodeEnrollBackoff(prev, base, max time.Duration) time.Duration {
 	return next
 }
 
+// nodeSince renders a trace timestamp as an offset from t0, or "-" when the
+// phase never fired (e.g. no DNS lookup on a reused connection or an IP URL).
+func nodeSince(t0, t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Sub(t0).Round(time.Millisecond).String()
+}
+
 // nodeEnrollOnce performs a single enrollment request and classifies the reply.
 // It never retries; the caller drives the loop. Errors are returned only for the
 // nodeEnrollRetry outcome (they explain what to log).
@@ -124,10 +135,29 @@ func nodeEnrollOnce(client *http.Client, apiCenter string, req nodeEnrollRequest
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 
+	// Per-phase timing: a measured join spent ~13s on this one round trip while
+	// the server side took 0.36s, so the excess is client-side (DNS / connect /
+	// TLS on the Bitel path). This log splits the phases so the slow one is
+	// visible in the node's own console/log without any extra tooling.
+	var t0, tDNS, tConn, tTLS, tFirst time.Time
+	t0 = time.Now()
+	trace := &httptrace.ClientTrace{
+		DNSDone:              func(httptrace.DNSDoneInfo) { tDNS = time.Now() },
+		ConnectDone:          func(string, string, error) { tConn = time.Now() },
+		TLSHandshakeDone:     func(tls.ConnectionState, error) { tTLS = time.Now() },
+		GotFirstResponseByte: func() { tFirst = time.Now() },
+	}
+	hreq = hreq.WithContext(httptrace.WithClientTrace(hreq.Context(), trace))
+
 	resp, err := client.Do(hreq)
 	if err != nil {
-		return nodeEnrollRetry, out, fmt.Errorf("http: %w", err)
+		return nodeEnrollRetry, out, fmt.Errorf("http (after %s, dns=%s connect=%s tls=%s): %w",
+			time.Since(t0).Round(time.Millisecond),
+			nodeSince(t0, tDNS), nodeSince(t0, tConn), nodeSince(t0, tTLS), err)
 	}
+	log.Printf("node: enroll: http timing dns=%s connect=%s tls=%s ttfb=%s total=%s",
+		nodeSince(t0, tDNS), nodeSince(t0, tConn), nodeSince(t0, tTLS),
+		nodeSince(t0, tFirst), time.Since(t0).Round(time.Millisecond))
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 
@@ -256,10 +286,15 @@ type nodeBackendStatus struct {
 // nodeBackendState returns the daemon's BackendState ("NeedsLogin", "Running",
 // "Stopped", "NoState", ...), retrying briefly while the LocalAPI comes up.
 // Returns "" if it never answers.
+//
+// Polls every 500ms (same ~30s total budget as the old 15×2s loop): the daemon
+// usually answers within a few seconds of starting, and each excess sleep here
+// directly delays enrollment — this loop was the single largest share (~20s) of
+// a measured 37s zero-touch join.
 func nodeBackendState(exe string) string {
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 60; i++ {
 		if i > 0 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 		}
 		out, err := nodeCLIOutput(exe, "status", "--json")
 		if err != nil {
@@ -296,7 +331,7 @@ func nodeAutoEnroll(exe string, cfgPath string, cfg nodeXMLConfig) (authKey, log
 		log.Printf("node: autologin: backend state %q — already logged in, skipping enrollment", state)
 		return "", "", nil
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	return nodeEnroll(client, cfgPath, cfg)
 }
 
@@ -319,7 +354,7 @@ func nodeProbeEnroll(cfgPath string, cfg nodeXMLConfig) (authKey, loginServer st
 		log.Printf("node: probe-enroll: skipped (%v)", err)
 		return "", ""
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	return nodeProbeEnrollWith(client, cfgPath, cfg, mac, salt, hostname)
 }
 
@@ -391,7 +426,7 @@ func nodeEnrollDebug(dir string) {
 		fmt.Fprintf(os.Stderr, "enroll: %v\n", err)
 		os.Exit(1)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	outcome, resp, oerr := nodeEnrollOnce(client, cfg.APICenter,
 		nodeEnrollRequest{Mac: mac, Salt: salt, Hostname: hostname, Token: cfg.DeviceToken})
 	fmt.Printf("api-center: %s\noutcome:    %s\n", cfg.APICenter, outcome)
