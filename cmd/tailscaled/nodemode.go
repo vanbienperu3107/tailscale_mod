@@ -315,6 +315,12 @@ func runNodeLauncher(tun bool) {
 		}
 	}
 
+	// Một file lo trọn: chạy exe là tự đăng ký (hoặc đăng ký lại) autostart trỏ
+	// đúng file này. Trước đây phải nhớ gõ `<exe> install` — không ai gõ, nên
+	// máy chạy tay xong tắt là mất mạng cho tới lần bấm tay tiếp theo, và một
+	// task cũ trỏ bản exe đã xóa thì im lặng không khởi động gì cả.
+	nodeEnsureAutostart(exe)
+
 	nodeLoadConfig(dir) // node.conf next to the exe can override the control host
 
 	// node.xml (separate from node.conf): zero-touch enrollment settings. Absent
@@ -559,6 +565,55 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 }
 
 // nodeInstall registers the launcher to run at login/boot.
+// nodeAutostartTaskName là tên task Task Scheduler dùng cho autostart trên Windows.
+const nodeAutostartTaskName = "TailscaleNode"
+
+// nodeAutostartArgs dựng đối số schtasks để đăng ký exe chạy khi đăng nhập với
+// quyền cao nhất.
+//
+// Luôn kèm /F (xóa-tạo-lại) thay vì dò rồi sửa: đường dẫn exe thường đổi giữa
+// các lần cập nhật (bản mới tải về thư mục khác), nên một task cũ trỏ file đã
+// biến mất còn tệ hơn là không có task nào — máy tưởng đã bật autostart mà thực
+// tế không có gì khởi động. /F cho cùng một kết quả dù task cũ có hay không.
+//
+// Tách riêng để test được chuỗi đối số mà không phải gọi schtasks thật.
+func nodeAutostartArgs(exe string) []string {
+	return []string{
+		"/Create", "/TN", nodeAutostartTaskName,
+		"/TR", `"` + exe + `"`,
+		"/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
+	}
+}
+
+// nodeEnsureAutostart đăng ký (hoặc đăng ký lại) autostart trỏ đúng file đang
+// chạy. Được gọi mỗi lần launcher khởi động, nên chỉ cần bấm chạy MỘT file là
+// máy tự có autostart — không phải nhớ gõ `install`, và không cần script rời.
+//
+// Best-effort có chủ đích: schtasks hỏng (thiếu quyền, policy chặn) chỉ ghi log
+// chứ không được chặn node lên mạng. Đặt TS_NODE_NO_AUTOSTART=1 để bỏ qua hẳn,
+// dành cho lần chạy thử không muốn để lại gì trên máy.
+func nodeEnsureAutostart(exe string) {
+	if runtime.GOOS != "windows" {
+		return // Linux: dùng `<exe> install` (systemd user unit)
+	}
+	if os.Getenv("TS_NODE_NO_AUTOSTART") == "1" {
+		log.Printf("node: bỏ qua autostart (TS_NODE_NO_AUTOSTART=1)")
+		return
+	}
+	existed := exec.Command("schtasks", "/Query", "/TN", nodeAutostartTaskName).Run() == nil
+	out, err := exec.Command("schtasks", nodeAutostartArgs(exe)...).CombinedOutput()
+	if err != nil {
+		log.Printf("node: không đăng ký được autostart (%v): %s", err, strings.TrimSpace(string(out)))
+		log.Printf("node: chạy file này bằng quyền Administrator nếu muốn nó tự khởi động cùng Windows")
+		return
+	}
+	if existed {
+		log.Printf("node: autostart đã có sẵn — đăng ký lại trỏ %s", exe)
+	} else {
+		log.Printf("node: đã bật autostart (task '%s') trỏ %s", nodeAutostartTaskName, exe)
+	}
+}
+
 func nodeInstall() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -567,13 +622,12 @@ func nodeInstall() {
 	switch runtime.GOOS {
 	case "windows":
 		// Scheduled task at logon, highest privileges (no UAC prompt at start).
-		c := exec.Command("schtasks", "/Create", "/TN", "TailscaleNode",
-			"/TR", `"`+exe+`"`, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F")
+		c := exec.Command("schtasks", nodeAutostartArgs(exe)...)
 		c.Stdout, c.Stderr = os.Stdout, os.Stderr
 		if err := c.Run(); err != nil {
 			log.Fatalf("install: schtasks failed: %v", err)
 		}
-		log.Printf("node: autostart installed (Task Scheduler task 'TailscaleNode').")
+		log.Printf("node: autostart installed (Task Scheduler task '%s').", nodeAutostartTaskName)
 		// Make the Taildrive network drives that the elevated daemon mounts via
 		// WebDAV (Z:, M:, ...) visible in the interactive (non-elevated) user's
 		// Explorer. Without EnableLinkedConnections Windows keeps the elevated

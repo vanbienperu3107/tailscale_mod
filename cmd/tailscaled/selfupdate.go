@@ -60,6 +60,26 @@ func nodeCurrentBuild() int {
 	return n
 }
 
+// nodeShouldSwapBuild quyết định có nên đổi sang build dashboard công bố hay
+// không. CHỈ tiến lên: latest > current.
+//
+// Trước đây điều kiện là `latest != current`, nghĩa là một build CŨ HƠN cũng
+// được coi là "bản mới" và client tự hạ cấp. Hậu quả không chỉ là chạy nhầm
+// bản cũ: hạ cấp xong, lần kiểm tra sau lại thấy build mới hơn và nâng lên,
+// rồi lại hạ — mỗi vòng là một lần đổi binary + restart launcher, tức một lần
+// rớt sạch kết nối. Ghi nhận thực tế trên VOTAM-PC ngày 2026-09-04: hạ 111→108
+// lúc 16:13:54 rồi nâng 108→111 lúc 16:15:57, cách nhau 2 phút.
+//
+// current == 0 nghĩa là binary không nhúng số build (bản dựng tay); ở trên
+// checkAndSelfUpdate đã chặn trường hợp đó, hàm này chặn thêm lần nữa để việc
+// hạ cấp không lọt qua bất kỳ đường nào.
+func nodeShouldSwapBuild(latest, current int) bool {
+	if latest <= 0 || current <= 0 {
+		return false
+	}
+	return latest > current
+}
+
 type nodeLatest struct {
 	Enabled bool   `json:"enabled"`
 	Reason  string `json:"reason"` // set when Enabled is false: why (see nodeUpdateReasonText)
@@ -123,8 +143,9 @@ func checkAndSelfUpdate(base, secret, exe, mac string) bool {
 		log.Printf("node: no update — dashboard reported enabled but no publishable build for variant %q", nodeVariant)
 		return false
 	}
-	if latest.Build == nodeCurrentBuild() {
-		log.Printf("node: already on the latest build %d — nothing to update", latest.Build)
+	if !nodeShouldSwapBuild(latest.Build, nodeCurrentBuild()) {
+		log.Printf("node: đang chạy build %d, dashboard công bố build %d — không đổi",
+			nodeCurrentBuild(), latest.Build)
 		return false
 	}
 	log.Printf("node: update available build %d -> %d (%s), downloading…",
