@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -136,8 +137,19 @@ func (c *Conn) pickDERPFallback() int {
 	// We used to do the above for legacy clients, but never updated
 	// it for disco.
 
+	// Region hiện tại chỉ được giữ khi nó CÒN SỐNG. Nếu fast-ping đã fail liên
+	// tục quá derpHomeDeadGrace thì bám lại chính nó đồng nghĩa không bao giờ
+	// thoát khỏi một relay không tới được (ca votam-pc 2026-09-04: đường tới
+	// vpn4 đứt hơn một giờ, netcheck mất hết số đo nên luôn rơi vào nhánh này).
+	myDerpDead := false
 	if c.myDerp != 0 {
-		return c.myDerp
+		failSince, has := c.derpPingFailSince.Load(c.myDerp)
+		myDerpDead = derpRegionIsDead(failSince, has, time.Now())
+		if !myDerpDead {
+			return c.myDerp
+		}
+		c.logf("magicsock: derp-%d ping-fail liên tục > %v -> loại khỏi fallback, chọn region khác",
+			c.myDerp, derpHomeDeadGrace)
 	}
 
 	if pickDERPFallbackForTests != nil {
@@ -145,7 +157,9 @@ func (c *Conn) pickDERPFallback() int {
 	}
 
 	metricDERPHomeFallback.Add(1)
-	return ids[rands.IntN(uint64(uintptr(unsafe.Pointer(c))), len(ids))]
+	return pickDERPFallbackID(ids, c.myDerp, myDerpDead, func(n int) int {
+		return rands.IntN(uint64(uintptr(unsafe.Pointer(c))), n)
+	})
 }
 
 // This allows existing tests to pass, but allows us to still test the
@@ -804,6 +818,22 @@ func (c *Conn) runDerpFastPing(ctx context.Context, regionID int, dc *derphttp.C
 				if ctx.Err() != nil {
 					return
 				}
+
+				// Ghi mốc bắt đầu chuỗi fail liên tục để (a) cho kết nối đang
+				// thiết lập kịp hoàn tất, (b) đánh dấu region chết cho fallback.
+				now := time.Now()
+				failSince, hasFail := c.derpPingFailSince.Load(regionID)
+				if !hasFail {
+					failSince = now
+					c.derpPingFailSince.Store(regionID, failSince)
+				}
+				if !derpShouldCloseOnPingFail(err, failSince, now) {
+					// Kết nối chưa nối xong: chờ tiếp, KHÔNG giết nó giữa chừng.
+					c.logf("[v1] magicsock: derp-%d đang nối (%v), chờ thêm (%v/%v)",
+						regionID, err, now.Sub(failSince).Round(time.Second), derpConnectGrace)
+					continue
+				}
+
 				c.logf("magicsock: derp-%d ping failed (%v), closing region and reconnecting", regionID, err)
 
 				// ÉP trước -> auto sau: nếu region này là home ÉP (assign tường
@@ -848,8 +878,9 @@ func (c *Conn) runDerpFastPing(ctx context.Context, regionID int, dc *derphttp.C
 				return
 			}
 
-			// Ping thành công: reset đồng hồ "chết" của home ép (nếu có).
+			// Ping thành công: region còn sống, xoá mọi đồng hồ "chết".
 			c.derpForcedFailSince.Delete(regionID)
+			c.derpPingFailSince.Delete(regionID)
 			lastRTT = rtt
 			c.derpPingLatency.Store(regionID, rtt)
 			c.logf("[v1] magicsock: derp-%d ping RTT=%v", regionID, rtt.Round(time.Millisecond))
@@ -1280,4 +1311,75 @@ const (
 	// tục quá khoảng này mới cho phép auto-switch sang region khác ("30s chết thì
 	// dời bỏ"). Trong thời gian này client cứ reconnect lại chính region ép.
 	derpForcedDeadGrace = 30 * time.Second
+
+	// derpConnectGrace: khoảng ân hạn cho một kết nối DERP ĐANG thiết lập.
+	//
+	// derphttp trả lỗi "client not connected" NGAY khi chưa có kết nối, trong khi
+	// bước connect của nó có timeout 10s. Fast-ping chạy mỗi 2s nên nếu coi lỗi
+	// đó là "node chết" thì nó đóng luôn kết nối đang dở, mở kết nối mới, rồi lại
+	// giết sau 2s — trên đường mạng chậm/lossy thì không lần nào kịp xong. Phải
+	// LỚN HƠN timeout connect của derphttp (10s) mới có tác dụng.
+	derpConnectGrace = 15 * time.Second
+
+	// derpHomeDeadGrace: sau chừng này ping-fail liên tục, region home được coi
+	// là chết hẳn và pickDERPFallback KHÔNG chọn lại nó nữa mà nhường cho region
+	// khác. Trước đây pickDERPFallback luôn trả về c.myDerp nên khi netcheck mất
+	// hết số đo (udp=false, mọi probe timeout) client bám mãi region đã chết.
+	// Đặt dài hơn derpForcedDeadGrace để chỉ đứt kéo dài mới đổi, tránh flapping.
+	derpHomeDeadGrace = 60 * time.Second
 )
+
+// derpPingErrIsNotConnected cho biết lỗi ping có phải là "chưa nối xong" hay
+// không. derphttp.Client.SendPing trả về lỗi này tức thì khi client == nil, tức
+// là bước connect vẫn đang chạy — KHÔNG phải bằng chứng node chết.
+func derpPingErrIsNotConnected(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "client not connected")
+}
+
+// derpShouldCloseOnPingFail quyết định có đóng region để nối lại sau một lần
+// ping hỏng hay không.
+//
+// Lỗi "chưa nối xong" chỉ được coi là chết khi đã kéo dài quá derpConnectGrace,
+// để kết nối đang thiết lập có đủ thời gian hoàn tất. Mọi lỗi khác (pong quá
+// hạn, kết nối bị reset) giữ nguyên hành vi cũ: đóng ngay.
+func derpShouldCloseOnPingFail(err error, failSince, now time.Time) bool {
+	if !derpPingErrIsNotConnected(err) {
+		return true
+	}
+	return now.Sub(failSince) >= derpConnectGrace
+}
+
+// derpRegionIsDead cho biết một region đã ping-fail liên tục đủ lâu để bị loại
+// khỏi lựa chọn fallback. hasFailSince=false nghĩa là region đang khoẻ.
+func derpRegionIsDead(failSince time.Time, hasFailSince bool, now time.Time) bool {
+	return hasFailSince && now.Sub(failSince) >= derpHomeDeadGrace
+}
+
+// pickDERPFallbackID chọn region fallback từ danh sách ids.
+//
+// Giữ nguyên region hiện tại (myDerp) nếu nó còn sống — đây là hành vi cũ và là
+// điều đúng trong hầu hết trường hợp. Nhưng khi region hiện tại đã chết hẳn
+// (myDerpDead), phải chọn region KHÁC, nếu không client bám mãi vào một relay
+// không tới được. pickRandom được truyền vào để test tất định.
+func pickDERPFallbackID(ids []int, myDerp int, myDerpDead bool, pickRandom func(n int) int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	if myDerp != 0 && !myDerpDead {
+		return myDerp
+	}
+	if myDerpDead {
+		// Loại region đã chết; chỉ khi không còn lựa chọn nào khác mới quay lại nó.
+		alive := make([]int, 0, len(ids))
+		for _, id := range ids {
+			if id != myDerp {
+				alive = append(alive, id)
+			}
+		}
+		if len(alive) == 0 {
+			return myDerp
+		}
+		return alive[pickRandom(len(alive))]
+	}
+	return ids[pickRandom(len(ids))]
+}

@@ -378,6 +378,13 @@ type Conn struct {
 	// cho auto-switch. Xoá entry khi ping thành công lại hoặc khi đã dời đi.
 	derpForcedFailSince syncs.Map[int, time.Time]
 
+	// derpPingFailSince ghi thời điểm bắt đầu chuỗi ping-fail LIÊN TỤC của MỌI
+	// region (không chỉ home ép). Hai công dụng: (1) cho phép kết nối đang thiết
+	// lập có đủ thời gian hoàn tất trước khi fast-ping kết luận "chết" (xem
+	// derpConnectGrace); (2) đánh dấu region là chết để pickDERPFallback không
+	// chọn lại chính nó (xem derpHomeDeadGrace). Xoá khi ping thành công.
+	derpPingFailSince syncs.Map[int, time.Time]
+
 	// derpRoute contains optional alternate routes to use as an
 	// optimization instead of contacting a peer via their home
 	// DERP connection.  If they sent us a message on a different
