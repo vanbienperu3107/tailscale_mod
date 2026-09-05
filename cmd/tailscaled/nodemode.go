@@ -309,10 +309,10 @@ func runNodeLauncher(tun bool) {
 	// tailscaled.log next to it is the CHILD daemon's own networking log; this
 	// process never wrote to it. MultiWriter keeps console output too, for
 	// interactive/manual runs.
+	// Log xoay theo ngày (nodeLogKeepDays ngày), thay cho O_APPEND ghi mãi vào
+	// một file — trước đây file này và tailscaled.log phình không giới hạn.
 	if err := os.MkdirAll(logDir, 0o700); err == nil {
-		if lf, lerr := os.OpenFile(filepath.Join(logDir, "node-launcher.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); lerr == nil {
-			log.SetOutput(io.MultiWriter(os.Stderr, lf))
-		}
+		log.SetOutput(io.MultiWriter(os.Stderr, nodeLogWriter(logDir, "node-launcher.log")))
 	}
 
 	// Một file lo trọn: chạy exe là tự đăng ký (hoặc đăng ký lại) autostart trỏ
@@ -481,11 +481,14 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 	d.Env = env
 	// Daemon logs to a file so the node can run windowless; the interactive
 	// OIDC login URL still prints to this launcher's console (up child, below).
-	if lf, lerr := os.OpenFile(filepath.Join(logDir, "tailscaled.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); lerr == nil {
-		d.Stdout, d.Stderr = lf, lf
-	} else {
-		d.Stdout, d.Stderr = os.Stdout, os.Stderr
-	}
+	//
+	// Launcher tự cầm đầu ghi (io.Writer chứ không phải *os.File) để có thể xoay
+	// file theo ngày trong lúc daemon vẫn chạy: os/exec sẽ nối daemon qua một
+	// pipe và sao chép vào writer này. Daemon chạy liên tục nhiều ngày nên nếu
+	// đưa thẳng fd thì không bao giờ xoay được.
+	dlog := nodeLogWriter(logDir, "tailscaled.log")
+	defer dlog.Close()
+	d.Stdout, d.Stderr = dlog, dlog
 	nodeHideChildWindow(d)
 	if err := d.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
