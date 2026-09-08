@@ -70,6 +70,9 @@ jobs:
           # DERP anti-flapping: ping/timeout decision + "forced (assigned) home
           # sticks, auto-switch only after 30s dead". Validate across all cases.
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
+          # RegionScore × latency phải bão hoà thay vì tràn int64 (score 1e30 từ
+          # dashboard từng làm region bị phạt thắng vòng chọn home, 2026-09-07).
+          go test -v -run 'ScaleLatencyByScore|PenalizedRegionNeverBeats' ./net/netcheck/
           # Deterministic machine key: same seed → same key (stable node/IP,
           # the fix for install-time IP drift).
           go test -v -run 'MachineFromSeed|MachineKey' ./types/key/

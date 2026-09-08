@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -1044,5 +1045,51 @@ func TestNoUDPNilGetReportOpts(t *testing.T) {
 	}
 	if r.UDP {
 		t.Fatal("unexpected working UDP")
+	}
+}
+
+// TestScaleLatencyByScoreSaturates khoá lỗi tràn số khi nhân latency với
+// RegionScore cực lớn. Ca thật 2026-09-07 trên votam: map per-node phạt region
+// 1003 bằng score 1e30; 374ms*1e30 tràn int64 thành số âm nên 1003 (374ms)
+// thắng 1001 (59ms, score 0.46) và thành home DERP.
+func TestScaleLatencyByScoreSaturates(t *testing.T) {
+	tests := []struct {
+		name  string
+		d     time.Duration
+		score float64
+		want  time.Duration
+	}{
+		{"score 0 giữ nguyên", 59 * time.Millisecond, 0, 59 * time.Millisecond},
+		{"score âm giữ nguyên", 59 * time.Millisecond, -1, 59 * time.Millisecond},
+		{"score ưu tiên (<1) giảm latency", 100 * time.Millisecond, 0.5, 50 * time.Millisecond},
+		{"score phạt vừa (1e6) không tràn", 374 * time.Millisecond, 1e6, 374 * time.Millisecond * 1e6},
+		{"score phạt 1e30 bão hoà thay vì tràn", 374 * time.Millisecond, 1e30, maxScaledLatency},
+		{"score +Inf bão hoà", 1 * time.Millisecond, math.Inf(1), maxScaledLatency},
+		{"score NaN bão hoà", 1 * time.Millisecond, math.NaN(), maxScaledLatency},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scaleLatencyByScore(tt.d, tt.score)
+			if got != tt.want {
+				t.Errorf("scaleLatencyByScore(%v, %g) = %v, muốn %v", tt.d, tt.score, got, tt.want)
+			}
+			if got < 0 {
+				t.Errorf("kết quả âm %v — chính là lỗi tràn số", got)
+			}
+		})
+	}
+}
+
+// TestPenalizedRegionNeverBeatsAssignedHome mô phỏng đúng map per-node của
+// dashboard (region gán score 0.46, region không gán score 1e30) và khẳng định
+// region bị phạt KHÔNG thể có latency hiệu dụng nhỏ hơn region được gán, dù
+// latency thô của nó nhỏ tới đâu.
+func TestPenalizedRegionNeverBeatsAssignedHome(t *testing.T) {
+	assigned := scaleLatencyByScore(59*time.Millisecond, 0.464159)
+	for _, raw := range []time.Duration{time.Nanosecond, time.Millisecond, 374 * time.Millisecond, 5 * time.Second} {
+		penalized := scaleLatencyByScore(raw, 1e30)
+		if penalized <= assigned {
+			t.Errorf("region phạt (raw %v) hiệu dụng %v <= region gán %v: sẽ bị chọn nhầm làm home", raw, penalized, assigned)
+		}
 	}
 }
