@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -1354,6 +1355,29 @@ const (
 
 // addReportHistoryAndSetPreferredDERP adds r to the set of recent Reports
 // and mutates r.PreferredDERP to contain the best recent one.
+// maxScaledLatency là trần cho latency đã nhân điểm (HomeParams.RegionScore).
+// Giữ dưới math.MaxInt64 để phép so sánh "nhỏ hơn" còn đúng.
+const maxScaledLatency = time.Duration(math.MaxInt64)
+
+// scaleLatencyByScore nhân latency với RegionScore của region đó và BÃO HÒA
+// tại maxScaledLatency thay vì tràn số.
+//
+// Trước đây `time.Duration(float64(d) * score)` với score cực lớn (dashboard
+// phạt region không được gán bằng 1e30) cho tích ~1e38ns, vượt int64; kết quả
+// chuyển đổi là rác (âm hoặc MinInt64) nên region BỊ PHẠT NẶNG NHẤT lại thắng
+// vòng chọn "latency nhỏ nhất" và thành home DERP. Ca thật 2026-09-07: votam
+// chọn vpn6 374ms (score 1e30) thay vì vpn4 59ms (score 0.46).
+func scaleLatencyByScore(d time.Duration, score float64) time.Duration {
+	if score <= 0 {
+		return d
+	}
+	scaled := float64(d) * score
+	if scaled >= float64(maxScaledLatency) || math.IsInf(scaled, 1) || math.IsNaN(scaled) {
+		return maxScaledLatency
+	}
+	return time.Duration(scaled)
+}
+
 func (c *Client) addReportHistoryAndSetPreferredDERP(rs *reportState, r *Report, dm tailcfg.DERPMapView) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1395,7 +1419,7 @@ func (c *Client) addReportHistoryAndSetPreferredDERP(rs *reportState, r *Report,
 	}
 	for regionID, d := range bestRecent {
 		if score := scores.Get(regionID); score > 0 {
-			bestRecent[regionID] = time.Duration(float64(d) * score)
+			bestRecent[regionID] = scaleLatencyByScore(d, score)
 		}
 	}
 
@@ -1411,7 +1435,7 @@ func (c *Client) addReportHistoryAndSetPreferredDERP(rs *reportState, r *Report,
 		// don't mutate the actual reports in-place (in case scores
 		// change), so we need to do it here as well.
 		if score := scores.Get(regionID); score > 0 {
-			d = time.Duration(float64(d) * score)
+			d = scaleLatencyByScore(d, score)
 		}
 
 		if regionID == prevDERP {
