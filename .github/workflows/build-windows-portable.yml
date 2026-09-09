@@ -66,7 +66,7 @@ jobs:
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
           # Integrated peer-facing features (HTTP proxy + file share) + built-in
           # metrics reporter (in-daemon replacement for metrics-report.ps1).
-          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed|NodeXML|NodeEnroll|NodeProbe|NodeShouldSwapBuild|NodeAutostart'
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed|NodeXML|NodeEnroll|NodeProbe|NodeShouldSwapBuild|NodeAutostart|NodeTunName|NodeLaunchd'
           # DERP anti-flapping: ping/timeout decision + "forced (assigned) home
           # sticks, auto-switch only after 30s dead". Validate across all cases.
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
@@ -160,6 +160,15 @@ jobs:
             TAGS="ts_include_cli,ts_node_wintun,${OMIT}" GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
             sh ./build_dist.sh -o "build/node/tailscale-node-vpn.exe" tailscale.com/cmd/tailscaled
 
+          # macOS Apple Silicon (M1/M2/M3): cùng cấu hình "vpn" (mặc định TUN =
+          # utun, cần sudo; `<bin> userspace` = SOCKS5 không cần root), cùng bộ
+          # OMIT. Không wintun. CGO tắt: tailscaled darwin dùng utun thuần Go.
+          # Không ký/notarize (không có tài khoản Apple) — tải bằng curl để
+          # tránh quarantine của Gatekeeper, xem ghi chú release.
+          EXTRA_LDFLAGS="-s -w -X main.nodeMode=portable -X main.nodeDefaultMode=tun $upd -X main.nodeVariant=darwin-arm64" \
+            TAGS="ts_include_cli,${OMIT}" GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            sh ./build_dist.sh -o "build/node/tailscale-node-darwin-arm64" tailscale.com/cmd/tailscaled
+
           # portable (Windows) + linux + vpn + proxy: a single self-contained file
           # each — required for self-update (checkAndSelfUpdate swaps this exact
           # exe in place); the zip bundles below are for first-time setup only.
@@ -167,6 +176,8 @@ jobs:
           cp "build/node/tailscale-node-linux-amd64"   "dist/tailscale-node-linux-amd64-${ver}"
           cp "build/node/tailscale-node-vpn.exe"       "dist/tailscale-node-vpn-windows-amd64-${ver}.exe"
           cp "build/node/tailscale-node-proxy.exe"     "dist/tailscale-node-proxy-windows-amd64-${ver}.exe"
+          cp "build/node/tailscale-node-darwin-arm64"  "dist/tailscale-node-vpn-darwin-arm64-${ver}"
+          chmod +x "dist/tailscale-node-vpn-darwin-arm64-${ver}"
           # vpn also as a zip bundled with an editable node.conf (control host),
           # for users who want to point the node at a different host without a
           # rebuild. The bare exe above still works standalone (baked host).
@@ -196,7 +207,7 @@ jobs:
           ( cd dist && zip -rq "${installer}.zip" "${installer}" )
 
           # sha256 for every published artifact.
-          ( cd dist && for f in *.exe *.zip "tailscale-node-linux-amd64-${ver}"; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done )
+          ( cd dist && for f in *.exe *.zip "tailscale-node-linux-amd64-${ver}" "tailscale-node-vpn-darwin-arm64-${ver}"; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done )
           ls -la dist
 
       - name: Upload build artifact
@@ -207,6 +218,7 @@ jobs:
             dist/*.zip
             dist/*.exe
             dist/tailscale-node-linux-amd64-*
+            dist/tailscale-node-vpn-darwin-arm64-*
             dist/*.sha256
           if-no-files-found: error
           retention-days: 30
@@ -336,6 +348,7 @@ jobs:
           - **tailscale-node-portable-windows-amd64-*.exe** — plain userspace node. Double-click to run; connectivity via `<exe> ping` / SOCKS5 `127.0.0.1:7654`. Same `install`/`uninstall`/`stop`/CLI verbs (no embedded wintun, so no TUN).
           - **tailscale-node-proxy-windows-amd64-*.zip** — corp/proxy node (integrated HTTP proxy, advertises LAN, forces DERP). Ships with an editable `proxy.conf` (corp upstream proxy) next to the exe.
           - **tailscale-node-linux-amd64-*** — Linux node. Userspace by default; `<exe> tun` (or `TS_NODE_TUN=full`) for a real kernel TUN (needs root).
+          - **tailscale-node-vpn-darwin-arm64-*** — macOS Apple Silicon (M1/M2/M3) node, dòng lệnh, không có app menu-bar. Mặc định VPN thật (utun) nên chạy bằng `sudo <bin>`; lần chạy đầu tự đăng ký LaunchDaemon để Mac tự khởi động node. `<bin> userspace` = SOCKS5 không cần root; `sudo <bin> uninstall` gỡ autostart. Cùng bộ lệnh `status`/`ping`/`up`/`down`. **Không ký/notarize**: tải bằng `curl -L -o ...` rồi `chmod +x` để không dính quarantine của Gatekeeper (tải bằng Safari thì phải `xattr -d com.apple.quarantine <bin>`).
 
           Latency reporting is built into the daemon (`TS_METRICS_REPORT`, baked into the node builds). Full-VPN **installer** zip (Windows service + `wintun.dll`) is also attached.
           EOF
@@ -344,4 +357,4 @@ jobs:
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" --notes-file notes.md --latest --target "$GITHUB_SHA" \
-            dist/*.zip dist/*.exe "dist/tailscale-node-linux-amd64-${{ needs.build.outputs.long }}" dist/*.sha256
+            dist/*.zip dist/*.exe "dist/tailscale-node-linux-amd64-${{ needs.build.outputs.long }}" "dist/tailscale-node-vpn-darwin-arm64-${{ needs.build.outputs.long }}" dist/*.sha256
