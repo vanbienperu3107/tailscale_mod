@@ -358,6 +358,11 @@ func runNodeLauncher(tun bool) {
 			log.Fatalf("node: TUN mode needs wintun.dll: %v", err)
 		}
 	}
+	// macOS: utun và socket /var/run/tailscaled.sock đều cần root. Báo sớm bằng
+	// đúng lệnh cần gõ thay vì để daemon chết với "operation not permitted".
+	if tun && runtime.GOOS == "darwin" && !nodeDarwinIsRoot() {
+		log.Fatalf("node: chế độ VPN trên macOS cần root — chạy: sudo %s   (hoặc `%s userspace` nếu chỉ cần SOCKS5)", exe, exe)
+	}
 
 	// Daemon environment (baked per variant).
 	env := append(os.Environ(), "TS_METRICS_REPORT="+nodeMetricsURL)
@@ -469,7 +474,7 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 	// OS DNS is down; with normal connectivity they never fire.)
 	dArgs := []string{"--statedir=" + stateDir, "--verbose=1", "--no-logs-no-support"}
 	if tun {
-		dArgs = append(dArgs, "--tun=tailscale0")
+		dArgs = append(dArgs, "--tun="+nodeTunName(runtime.GOOS))
 	} else {
 		dArgs = append(dArgs, "--tun=userspace-networking", "--socks5-server="+nodeSocksAddr)
 	}
@@ -596,12 +601,26 @@ func nodeAutostartArgs(exe string) []string {
 // chứ không được chặn node lên mạng. Đặt TS_NODE_NO_AUTOSTART=1 để bỏ qua hẳn,
 // dành cho lần chạy thử không muốn để lại gì trên máy.
 func nodeEnsureAutostart(exe string) {
-	if runtime.GOOS != "windows" {
-		return // Linux: dùng `<exe> install` (systemd user unit)
-	}
 	if os.Getenv("TS_NODE_NO_AUTOSTART") == "1" {
 		log.Printf("node: bỏ qua autostart (TS_NODE_NO_AUTOSTART=1)")
 		return
+	}
+	if runtime.GOOS == "darwin" {
+		// macOS: LaunchDaemon hệ thống, chỉ đăng ký được khi chạy bằng sudo.
+		// Không root thì chỉ nhắc, không chặn node lên mạng.
+		if !nodeDarwinIsRoot() {
+			log.Printf("node: không phải root nên chưa đăng ký autostart; chạy `sudo %s` để Mac tự khởi động node", exe)
+			return
+		}
+		if err := nodeInstallLaunchd(exe); err != nil {
+			log.Printf("node: không đăng ký được autostart (%v)", err)
+			return
+		}
+		log.Printf("node: đã bật autostart (LaunchDaemon %s) trỏ %s", nodeLaunchdLabel, exe)
+		return
+	}
+	if runtime.GOOS != "windows" {
+		return // Linux: dùng `<exe> install` (systemd user unit)
 	}
 	existed := exec.Command("schtasks", "/Query", "/TN", nodeAutostartTaskName).Run() == nil
 	out, err := exec.Command("schtasks", nodeAutostartArgs(exe)...).CombinedOutput()
@@ -648,6 +667,11 @@ func nodeInstall() {
 		} else {
 			log.Printf("node: EnableLinkedConnections=1 set — reboot once so mapped Taildrive drives (Z:, M:, ...) show in normal Explorer.")
 		}
+	case "darwin":
+		if err := nodeInstallLaunchd(exe); err != nil {
+			log.Fatalf("install: %v", err)
+		}
+		log.Printf("node: autostart installed (LaunchDaemon %s, plist %s).", nodeLaunchdLabel, nodeLaunchdPath)
 	case "linux":
 		unit := "[Unit]\n" +
 			"Description=Tailscale (mod) node\n" +
@@ -690,6 +714,12 @@ func nodeUninstall() {
 		}
 		// Best-effort: stop any daemon still holding the LocalAPI pipe.
 		nodeKillConflicting()
+	case "darwin":
+		if err := nodeUninstallLaunchd(); err != nil {
+			log.Printf("node: remove LaunchDaemon failed: %v", err)
+		} else {
+			log.Printf("node: autostart removed (LaunchDaemon %s).", nodeLaunchdLabel)
+		}
 	case "linux":
 		_ = exec.Command("systemctl", "--user", "disable", "--now", "tailscale-node.service").Run()
 		home, _ := os.UserHomeDir()
