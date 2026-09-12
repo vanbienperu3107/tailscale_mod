@@ -7,76 +7,12 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
-
-// nodeDaemonJob is a Job Object with KILL_ON_JOB_CLOSE that holds the daemon
-// child. Its only handle lives in this launcher, so when the launcher exits for
-// ANY reason (console window closed, taskkill, crash) Windows closes the handle
-// and kills the daemon too. Before this, closing the launcher window orphaned
-// the daemon: it kept tailscale0 up with its subnet routes (10.121.0.0/16 ...),
-// so traffic still went over the VPN after the user "stopped" it, while its
-// logs went silent (they are piped through the dead launcher).
-var (
-	nodeDaemonJobOnce sync.Once
-	nodeDaemonJob     windows.Handle
-	nodeDaemonJobErr  error
-)
-
-// nodeBindDaemonToLauncher puts the daemon process into nodeDaemonJob. The
-// handle is deliberately never closed. Best-effort: on failure the daemon just
-// runs unbound, as before.
-func nodeBindDaemonToLauncher(p *os.Process) {
-	nodeDaemonJobOnce.Do(func() {
-		nodeDaemonJob, nodeDaemonJobErr = nodeNewKillOnCloseJob()
-	})
-	if nodeDaemonJobErr != nil {
-		log.Printf("node: daemon job object unavailable (%v); daemon will outlive the launcher", nodeDaemonJobErr)
-		return
-	}
-	if err := nodeAssignToJob(nodeDaemonJob, p); err != nil {
-		log.Printf("node: bind daemon pid %d to launcher job: %v", p.Pid, err)
-	}
-}
-
-// nodeNewKillOnCloseJob creates a Job Object that terminates every process in
-// it when its last handle closes.
-func nodeNewKillOnCloseJob() (windows.Handle, error) {
-	h, err := windows.CreateJobObject(nil, nil)
-	if err != nil {
-		return 0, err
-	}
-	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
-		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
-			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-		},
-	}
-	if _, err := windows.SetInformationJobObject(h, windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
-		windows.CloseHandle(h)
-		return 0, err
-	}
-	return h, nil
-}
-
-// nodeAssignToJob adds process p to job.
-func nodeAssignToJob(job windows.Handle, p *os.Process) error {
-	ph, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(p.Pid))
-	if err != nil {
-		return err
-	}
-	defer windows.CloseHandle(ph)
-	return windows.AssignProcessToJobObject(job, ph)
-}
 
 // nodeHideChildWindow starts the child daemon without its own console window.
 func nodeHideChildWindow(c *exec.Cmd) {

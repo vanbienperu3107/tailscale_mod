@@ -317,10 +317,17 @@ jobs:
           }
           finally {
             (& $exe stop 2>&1 | Out-String) | Write-Host
-            Get-Process | Where-Object { $_.ProcessName -like "tailscale-node*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+            # `stop` must take the daemon (and launcher) down — a surviving daemon
+            # keeps tailscale0 + its subnet routes. Check before the forced cleanup.
+            Start-Sleep -Seconds 2
+            $left = @(Get-Process | Where-Object { $_.ProcessName -like "tailscale-node*" })
+            $stopLeft = $left.Count
+            $left | Stop-Process -Force -ErrorAction SilentlyContinue
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           }
           if (-not $ok) { throw "FAIL: launcher never reached headscale control (see log above)" }
+          if ($stopLeft -gt 0) { throw "FAIL: '<exe> stop' left $stopLeft tailscale-node process(es) running" }
+          Write-Host "PASS: '<exe> stop' left no node process running."
           Write-Host "PASS: single-file node launcher started the daemon and reached the self-host headscale (NeedsLogin)."
 
   windows-unit:
@@ -339,7 +346,7 @@ jobs:
         run: |
           set -eu
           # Stale wintun cleanup must target exactly tstun's pinned devnode.
-          go test -v -run 'NodeStaleTun|NodeDaemonJob' ./cmd/tailscaled/
+          go test -v -run 'NodeStaleTun' ./cmd/tailscaled/
           # Removing an absent devnode must be harmless (the normal case).
           pnputil /remove-device 'SWD\Wintun\{37217669-42DA-4657-A55B-0D995D328250}' || echo "pnputil exit $? (expected: no such device)"
 
