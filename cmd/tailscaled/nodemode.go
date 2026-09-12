@@ -366,6 +366,10 @@ func runNodeLauncher(tun bool) {
 
 	// Daemon environment (baked per variant).
 	env := append(os.Environ(), "TS_METRICS_REPORT="+nodeMetricsURL)
+	if hint := nodeControlDNSHint(nodeLoginServer); hint != "" {
+		env = append(env, "TS_DNSFALLBACK_STATIC="+hint)
+		log.Printf("node: control DNS hint for daemon: %s", hint)
+	}
 
 	// Deterministic machine identity: seed the daemon's machine key from this
 	// PC's stable hardware serial so it keeps the SAME headscale node (and pinned

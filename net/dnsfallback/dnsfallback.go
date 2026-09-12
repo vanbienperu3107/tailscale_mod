@@ -66,6 +66,10 @@ func lookup(ctx context.Context, host string, logf logger.Logf, ht *health.Track
 	if ip, err := netip.ParseAddr(host); err == nil && ip.IsValid() {
 		return []netip.Addr{ip}, nil
 	}
+	if ips := staticHint(host); len(ips) > 0 {
+		logf("dnsfallback: using launcher-provided %v for %q", ips, host)
+		return ips, nil
+	}
 
 	type nameIP struct {
 		dnsName string

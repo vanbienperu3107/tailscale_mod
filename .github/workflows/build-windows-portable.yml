@@ -72,7 +72,7 @@ jobs:
           go test ./net/socks5/... ./net/tshttpproxy/... ./log/filelogger/...
           # Integrated peer-facing features (HTTP proxy + file share) + built-in
           # metrics reporter (in-daemon replacement for metrics-report.ps1).
-          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed|NodeXML|NodeEnroll|NodeProbe|NodeShouldSwapBuild|NodeAutostart|NodeTunName|NodeLaunchd'
+          go test -v ./cmd/tailscaled/ -run 'Peer|OneConnListener|Metrics|NodeNetcheck|NodeShouldReapply|FolderShare|NormalizeSerial|MachineKeySeed|NodeXML|NodeEnroll|NodeProbe|NodeShouldSwapBuild|NodeAutostart|NodeTunName|NodeLaunchd|NodeDNSHint'
           # DERP anti-flapping: ping/timeout decision + "forced (assigned) home
           # sticks, auto-switch only after 30s dead". Validate across all cases.
           go test -v -run 'DerpPingOnce|DerpFastPingTimeoutPolicy|DerpForced' ./wgengine/magicsock/
@@ -82,6 +82,9 @@ jobs:
           # Deterministic machine key: same seed → same key (stable node/IP,
           # the fix for install-time IP drift).
           go test -v -run 'MachineFromSeed|MachineKey' ./types/key/
+          # Launcher-provided control IP must bypass bootstrap DNS (derp*.tailscale.com
+          # unreachable from Peru; a join stalled ~2.5 min on it, 2026-09-12).
+          go test -v -run 'StaticHint' ./net/dnsfallback/
           # Combined single-file node binary (daemon+CLI+launcher in one exe):
           # verify it compiles for both OSes with the node launcher linked in.
           GOOS=linux   go build -tags ts_include_cli -ldflags "-X main.nodeMode=proxy" -o /dev/null ./cmd/tailscaled
