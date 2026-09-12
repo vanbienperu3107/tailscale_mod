@@ -5,7 +5,14 @@
 
 package main
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+)
+
+// nodeBindDaemonToLauncher is a no-op off Windows (no Job Objects; the Linux
+// systemd unit / macOS launchd manage the process tree there).
+func nodeBindDaemonToLauncher(p *os.Process) {}
 
 // nodeHideChildWindow is a no-op on non-Windows platforms.
 func nodeHideChildWindow(c *exec.Cmd) {}
