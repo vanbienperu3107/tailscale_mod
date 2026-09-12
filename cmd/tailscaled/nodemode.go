@@ -495,6 +495,9 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 	defer dlog.Close()
 	d.Stdout, d.Stderr = dlog, dlog
 	nodeHideChildWindow(d)
+	if tun {
+		nodeRemoveStaleTun()
+	}
 	if err := d.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}

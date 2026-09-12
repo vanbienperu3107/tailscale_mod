@@ -27,6 +27,24 @@ func nodeHideChildWindow(c *exec.Cmd) {
 // shows one UAC prompt and runs this process — and its daemon child — elevated.
 // No runtime self-relaunch is needed.
 
+// nodeStaleTunInstance is the PnP instance of the wintun adapter the daemon
+// creates: tstun pins the GUID ({37217669-...}, net/tstun/tun_windows.go), so
+// every run reuses this one devnode ID.
+const nodeStaleTunInstance = `SWD\Wintun\{37217669-42DA-4657-A55B-0D995D328250}`
+
+// nodeRemoveStaleTun deletes a wintun devnode left behind by an earlier daemon
+// run. Called only while no daemon of ours is running, so anything at that
+// instance ID is stale. Without this, wintun's create collides with the old
+// node (ntstatus 0xC0000035), waits out its 15s device-query timeout, then
+// succeeds on retry — measured as "got LocalBackend in 17.5s" vs 0.7s on a
+// clean start, i.e. most of a slow zero-touch join. Best-effort: pnputil
+// /remove-device needs Windows 10 2004+; a missing devnode is the normal case.
+func nodeRemoveStaleTun() {
+	c := exec.Command("pnputil", "/remove-device", nodeStaleTunInstance)
+	nodeHideChildWindow(c)
+	_ = c.Run()
+}
+
 // nodeKillConflicting stops processes that would fight this launcher's daemon
 // for the LocalAPI pipe and the SOCKS5 / peer-HTTP-proxy ports. Runs once at
 // launcher startup so the newest instance cleanly takes over. Best-effort.
