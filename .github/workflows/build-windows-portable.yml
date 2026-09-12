@@ -339,7 +339,7 @@ jobs:
         run: |
           set -eu
           # Stale wintun cleanup must target exactly tstun's pinned devnode.
-          go test -v -run 'NodeStaleTun' ./cmd/tailscaled/
+          go test -v -run 'NodeStaleTun|NodeDaemonJob' ./cmd/tailscaled/
           # Removing an absent devnode must be harmless (the normal case).
           pnputil /remove-device 'SWD\Wintun\{37217669-42DA-4657-A55B-0D995D328250}' || echo "pnputil exit $? (expected: no such device)"
 

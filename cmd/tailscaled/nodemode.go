@@ -501,6 +501,7 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 	if err := d.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}
+	nodeBindDaemonToLauncher(d.Process)
 	log.Printf("node[%s/%s]: daemon started (pid %d); bringing up against %s", nodeMode, modeName, d.Process.Pid, nodeLoginServer)
 
 	// Bring the node up (retry until the daemon is ready). OIDC login prints a
