@@ -12,6 +12,12 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+  # PRs run build + tests only; the release job skips pull_request events.
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
     inputs:
       release_version:
@@ -317,9 +323,29 @@ jobs:
           if (-not $ok) { throw "FAIL: launcher never reached headscale control (see log above)" }
           Write-Host "PASS: single-file node launcher started the daemon and reached the self-host headscale (NeedsLogin)."
 
+  windows-unit:
+    name: Windows-only unit tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run Windows-tagged node tests
+        shell: bash
+        run: |
+          set -eu
+          # Stale wintun cleanup must target exactly tstun's pinned devnode.
+          go test -v -run 'NodeStaleTun' ./cmd/tailscaled/
+          # Removing an absent devnode must be harmless (the normal case).
+          pnputil /remove-device 'SWD\Wintun\{37217669-42DA-4657-A55B-0D995D328250}' || echo "pnputil exit $? (expected: no such device)"
+
   release:
     name: Publish versioned release
-    needs: [build, smoke-test] # build is required to read its version outputs
+    needs: [build, smoke-test, windows-unit] # build is required to read its version outputs
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
