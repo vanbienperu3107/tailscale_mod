@@ -501,7 +501,6 @@ func nodeRunDaemonOnce(exe, stateDir, logDir string, env []string, tun bool) err
 	if err := d.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}
-	nodeBindDaemonToLauncher(d.Process)
 	log.Printf("node[%s/%s]: daemon started (pid %d); bringing up against %s", nodeMode, modeName, d.Process.Pid, nodeLoginServer)
 
 	// Bring the node up (retry until the daemon is ready). OIDC login prints a
@@ -741,13 +740,19 @@ func nodeUninstall() {
 	log.Printf("node: uninstalled. State kept at %s; delete it to fully reset.", filepath.Join(filepath.Dir(exe), "state"))
 }
 
-// nodeStop brings the node down via the built-in CLI.
+// nodeStop fully stops the node: `down` first (clean disconnect), then kills
+// the daemon and any launcher. Closing the launcher window deliberately leaves
+// the VPN running in the background, so `stop` is THE way to turn it off — and
+// a live daemon keeps tailscale0 with its subnet routes (10.121.0.0/16 ...),
+// so it must actually exit for the machine's routing to go back to normal.
 func nodeStop() {
 	exe, _ := os.Executable()
 	c := exec.Command(exe, "down")
 	c.Env = append(os.Environ(), "TS_BE_CLI=1")
 	c.Stdout, c.Stderr = os.Stdout, os.Stderr
 	_ = c.Run()
+	nodeKillConflicting()
+	log.Printf("node: stopped (daemon exited, VPN routes removed).")
 }
 
 // nodeLoadConfig reads an optional node.conf next to the exe and overrides the
