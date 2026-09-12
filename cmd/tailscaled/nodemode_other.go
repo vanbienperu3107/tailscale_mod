@@ -16,3 +16,7 @@ func nodeKillConflicting() {}
 // nodeEnsureWintun is a no-op off Windows: TUN mode uses the kernel tun driver
 // (Linux), so there is no wintun.dll to stage.
 func nodeEnsureWintun(dir string) error { return nil }
+
+// nodeRemoveStaleTun is a no-op off Windows: kernel TUN devices vanish with
+// the process that created them.
+func nodeRemoveStaleTun() {}
